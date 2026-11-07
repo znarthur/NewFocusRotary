@@ -1,0 +1,71 @@
+# Closed-loop rotary picomotor IOC: example configuration.
+# Every key is optional; the values shown are the defaults unless marked "example".
+# Positions are in degrees ("dial" coordinates, increasing for positive picomotor steps).
+
+ioc:
+  prefix: "29idX:"        # example: $(P)
+  motor: "m1"             # example: $(M); the record is $(P)$(M)
+  description: "Rotary picomotor (closed loop)"   # DESC (40 chars max)
+  egu: deg
+  precision: 4
+  update_rate_hz: 10      # readback / status update rate published to CA
+
+picomotor:
+  transport: usb          # usb | tcp | sim
+  usb_serial: null        # pick a specific 8742 when several are plugged in
+  usb_index: 0
+  host: null              # for transport: tcp (8742 Ethernet), e.g. 192.168.0.254
+  port: 23
+  address: null           # RS-485 daisy-chain address of a slave 8742 (e.g. 2)
+  timeout_s: 2.0
+
+encoder:
+  transport: serial       # serial | sim
+  port: auto              # auto = first USB serial port with VID 0x0483; or /dev/e201-XXXX, /dev/ttyACM0
+  usb_serial: null
+  # AksIM-2 BiSS-C frame layout -- must match your encoder part number.
+  # Run "newfocus-rotary-probe encoder" to check: it reports which frame lengths pass CRC.
+  singleturn_bits: 20     # e.g. 18, 19, 20 ... depending on the AksIM-2 resolution code
+  multiturn_bits: 0       # 0 for single-turn; 16 for multiturn variants
+  status_bits: 2          # error + warning (active low)
+  crc_bits: 6
+  clock_khz: null         # BiSS clock; null leaves the E201 default (e.g. 1000)
+  power_on: true          # switch encoder supply on at startup ("N" command)
+
+axis:
+  picomotor_axis: 1       # 8742 output (1-4) driving the rotary actuator
+  encoder_sign: 1         # set to -1 if the encoder counts down for positive picomotor steps
+  steps_per_degree: 1000.0          # initial estimate, + direction (run "newfocus-rotary-probe calibrate")
+  steps_per_degree_reverse: null    # initial estimate, - direction (null = same as +)
+  adapt: true             # keep learning steps/degree from every move
+  adapt_gain: 0.3
+  adapt_ratio_limits: [0.25, 4.0]
+  min_learn_steps: 20
+  fine_zone_deg: 0.05     # inside this error, use fractional corrections (fine_gain)
+  fine_gain: 0.8
+  chunk_time_s: 0.5       # longest uninterrupted move before the encoder is re-checked
+  settle_time_s: 0.05     # wait after each move before reading the encoder
+  poll_period_s: 0.03
+  idle_poll_period_s: 0.1
+  stall_chunks: 5         # consecutive no-motion moves before declaring a stall
+  limit_margin_deg: 0.5   # abort a move that overshoots a soft limit by this much
+  state_file: /var/lib/newfocus-rotary/m1.state.json   # example; persists SET offset, turns, learning
+
+motor:                    # initial motor-record field values
+  velocity: 1.0           # VELO  deg/s (converted to 8742 steps/s, max 2000)
+  accel: 0.2              # ACCL  s
+  retry_deadband: 0.002   # RDBD  deg  -- in-position tolerance of the closed loop
+  max_retries: 10         # RTRY  corrective moves before MISS is set
+  backlash: 0.0           # BDST  deg  -- final approach from this side when non-zero
+  jog_velocity: 0.5       # JVEL  deg/s
+  tweak: 1.0              # TWV   deg
+  home_position: 0.0      # dial position HOMF/HOMR drive to (absolute encoder: no search)
+  dial_high_limit: 0.0    # DHLM  (DHLM == DLLM == 0 disables soft limits, as in the motor record)
+  dial_low_limit: 0.0     # DLLM
+  user_offset: 0.0        # OFF
+  user_direction: Pos     # DIR  Pos | Neg
+
+# sim:                    # only used with transport: sim
+#   speedup: 1.0
+#   deg_per_step_fwd: 0.0009
+#   deg_per_step_rev: 0.0011

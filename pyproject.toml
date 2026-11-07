@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "newfocus-rotary"
+version = "0.1.0"
+description = "EPICS motor-record IOC for a New Focus 8742 picomotor rotary stage, closed loop on a Renishaw/RLS AksIM-2 encoder via E201-9B"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "caproto>=1.1",
+    "pyserial>=3.4",
+    "pyusb>=1.2",
+    "pyyaml>=5.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+newfocus-rotary-ioc = "newfocus_rotary.ioc:main"
+newfocus-rotary-probe = "newfocus_rotary.probe:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
