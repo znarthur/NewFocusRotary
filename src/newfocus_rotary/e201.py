@@ -17,6 +17,19 @@ The 64-bit frame is MSB aligned::
 AksIM-2 status bits are active low (1 = OK).  The CRC is BiSS CRC-6,
 polynomial x^6 + x + 1 (0x43), initial value 0, transmitted inverted, computed
 over the position and status bits.
+
+Register access (BiSS-C bidirectional, E201-9B only), as used by RLS's tool:
+
+* ``Ws<value:03d>:<addr:03d>`` writes one byte; reply is a status code (0 = OK)
+* ``R<len:02d>:<addr:03d>`` reads ``len`` bytes; reply ``status:details:hexdata``
+* the register bank is selected by writing the bank number to address 0x40
+
+AksIM-2 registers (RLS ``registers_preset.py``, ``aksim2_preset``):
+
+* multiturn value: bank 3, 0x14..0x17 (32 bit, big endian)
+* unlock key: write 0xCD to 0x48 before a command
+* command register 0x49: 0x6D (``m``) = apply multiturn value
+* detailed status: bank 0, 0x4A..0x4B (16 bit)
 """
 
 from __future__ import annotations
@@ -41,6 +54,26 @@ E201_9B_CLOCK_KHZ = {
 
 class EncoderError(RuntimeError):
     pass
+
+
+E201_REGISTER_STATUS = {
+    "0": "OK",
+    "1": "End of bank reached",
+    "2": "CRC error or incorrect data length",
+    "3": "Address > 127 or number of bytes > 64 or zero",
+    "4": "Timeout",
+}
+
+BANK_SELECT_ADDR = 0x40
+AKSIM2_KEY_ADDR = 0x48
+AKSIM2_KEY = 0xCD
+AKSIM2_COMMAND_ADDR = 0x49
+AKSIM2_CMD_SET_MULTITURN = 0x6D
+AKSIM2_MULTITURN_BANK = 3
+AKSIM2_MULTITURN_ADDR = 0x14
+AKSIM2_DETAILED_STATUS_BANK = 0
+AKSIM2_DETAILED_STATUS_ADDR = 0x4A
+AKSIM2_DETAILED_STATUS_LEN = 2
 
 
 def biss_crc(value: int, nbits: int, poly: int = 0x43, width: int = 6) -> int:
@@ -242,6 +275,58 @@ class E201_9B:
                 return last
         assert last is not None
         return last
+
+    # -- BiSS register access ------------------------------------------
+    @staticmethod
+    def _check_status(reply: str, what: str) -> str:
+        code = reply.strip().split(":")[0].strip()
+        if code != "0":
+            msg = E201_REGISTER_STATUS.get(code, f"unknown reply {reply!r}")
+            raise EncoderError(f"BiSS register {what} failed: {msg}")
+        return reply
+
+    def write_register(self, address: int, value: int) -> None:
+        if not 0 <= value <= 255 or not 0 <= address <= 127:
+            raise ValueError("register value must be 0-255 and address 0-127")
+        self._check_status(self.query(f"Ws{value:03d}:{address:03d}"), f"write 0x{address:02X}")
+
+    def select_bank(self, bank: int) -> None:
+        self.write_register(BANK_SELECT_ADDR, bank)
+
+    def read_registers(self, bank: Optional[int], address: int, length: int) -> bytes:
+        if not 1 <= length <= 64 or not 0 <= address <= 127:
+            raise ValueError("length must be 1-64 and address 0-127")
+        with self.lock:
+            if bank is not None:
+                self.select_bank(bank)
+            reply = self._check_status(self.query(f"R{length:02d}:{address:03d}"), f"read 0x{address:02X}")
+        parts = reply.strip().split(":")
+        if len(parts) < 3:
+            raise EncoderError(f"Malformed register reply {reply!r}")
+        return bytes.fromhex(parts[2])
+
+    def write_registers(self, bank: Optional[int], address: int, data: bytes) -> None:
+        with self.lock:
+            if bank is not None:
+                self.select_bank(bank)
+            for i, b in enumerate(data):
+                self.write_register(address + i, b)
+
+    # -- AksIM-2 helpers --------------------------------------------------
+    def read_detailed_status(self) -> int:
+        """AksIM-2 detailed status register (see the AksIM-2 data sheet for the bit meanings)."""
+        raw = self.read_registers(AKSIM2_DETAILED_STATUS_BANK, AKSIM2_DETAILED_STATUS_ADDR, AKSIM2_DETAILED_STATUS_LEN)
+        return int.from_bytes(raw, "big")
+
+    def reset_multiturn(self, value: int = 0) -> None:
+        """Set the AksIM-2 multiturn counter (RLS sequence: value, key, apply command)."""
+        with self.lock:
+            self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR,
+                                 int(value).to_bytes(4, "big", signed=value < 0))
+            time.sleep(0.1)
+            self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
+            self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_SET_MULTITURN)
+            time.sleep(0.1)
 
     def power_off(self) -> None:
         self.query("F")

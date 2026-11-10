@@ -7,6 +7,8 @@
     newfocus-rotary-probe move -c config.yaml 45.0
     newfocus-rotary-probe move -c config.yaml --open-loop 45.0   # ignore the encoder
     newfocus-rotary-probe steps -c config.yaml -- -500             # raw picomotor steps, no encoder
+    newfocus-rotary-probe -c config.yaml encoder-status              # AksIM-2 detailed status register
+    newfocus-rotary-probe -c config.yaml reset-multiturn [--value 0] # clear a multiturn error
 """
 
 from __future__ import annotations
@@ -76,6 +78,61 @@ def cmd_encoder(args) -> int:
     if fmt.data_bits not in cands:
         print("WARNING: configured frame format fails CRC; adjust encoder.singleturn_bits/multiturn_bits")
     enc.close()
+    return 0
+
+
+def _open_e201(cfg, port=None):
+    from .e201 import E201_VID, E201_9B
+    from .transports import SerialTransport, find_serial_port_by_vid
+
+    port = port or cfg.encoder.port
+    if port == "auto":
+        port = find_serial_port_by_vid(E201_VID)
+        if not port:
+            raise SystemExit("No E201 found")
+    return port, E201_9B(SerialTransport(port), cfg.encoder.frame_format(), power_on=True,
+                         clock_khz=cfg.encoder.clock_khz)
+
+
+def _print_reading(enc) -> None:
+    r = enc.read()
+    fmt = enc.fmt
+    print(f"  frame {r.raw.hex().upper()}  st={r.singleturn} ({r.singleturn * 360.0 / fmt.counts_per_rev:.5f} deg)"
+          f" mt={r.multiturn} crc={'ok' if r.crc_ok else 'BAD'} err={int(r.error)} warn={int(r.warning)}")
+
+
+def cmd_encoder_status(args) -> int:
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    _print_reading(enc)
+    try:
+        st = enc.read_detailed_status()
+        print(f"  AksIM-2 detailed status (bank 0, 0x4A): 0x{st:04X}  bits set: "
+              f"{[b for b in range(16) if st >> b & 1] or 'none'}")
+        print("  (bit meanings: AksIM-2 data sheet, 'detailed status' register)")
+    except Exception as exc:
+        print(f"  detailed status not readable: {exc}")
+    enc.close()
+    return 0
+
+
+def cmd_reset_multiturn(args) -> int:
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    print("before:")
+    _print_reading(enc)
+    enc.reset_multiturn(args.value)
+    time.sleep(0.2)
+    print(f"after setting multiturn = {args.value}:")
+    _print_reading(enc)
+    r = enc.read()
+    enc.close()
+    if r.error:
+        print("encoder still reports an error; check 'encoder-status' and the mounting")
+        return 1
+    print("encoder OK. If the IOC uses a state file, re-reference with SET mode if the dial looks wrong.")
     return 0
 
 
@@ -182,12 +239,18 @@ def main(argv=None) -> None:
     p = sub.add_parser("move", help="closed-loop move to a dial position (no IOC)")
     p.add_argument("--open-loop", action="store_true", help="move by step count, ignore the encoder")
     p.add_argument("target", type=float)
+    p = sub.add_parser("encoder-status", help="read the AksIM-2 detailed status register")
+    p.add_argument("--port")
+    p = sub.add_parser("reset-multiturn", help="reset the AksIM-2 multiturn counter (clears multiturn error)")
+    p.add_argument("--port")
+    p.add_argument("--value", type=int, default=0, help="turn count to set (default 0)")
     p = sub.add_parser("steps", help="move the picomotor a raw number of steps (no encoder)")
     p.add_argument("--velocity", type=int, help="steps/s (1-2000)")
     p.add_argument("steps", type=int)
     args = ap.parse_args(argv)
     fn = {"list": cmd_list, "encoder": cmd_encoder, "picomotor": cmd_picomotor,
-          "calibrate": cmd_calibrate, "move": cmd_move, "steps": cmd_steps}[args.cmd]
+          "calibrate": cmd_calibrate, "move": cmd_move, "steps": cmd_steps,
+          "encoder-status": cmd_encoder_status, "reset-multiturn": cmd_reset_multiturn}[args.cmd]
     sys.exit(fn(args))
 
 

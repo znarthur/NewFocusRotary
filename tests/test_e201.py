@@ -133,3 +133,36 @@ def test_e201_crc_retry():
     enc = E201_9B(t, fmt)
     r = enc.read()
     assert r.crc_ok and r.singleturn == 777
+
+
+def test_aksim2_multiturn_reset_sequence():
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, BissFrameFormat(singleturn_bits=18, multiturn_bits=16))
+    t.replies = {}
+
+    class AnyOK(dict):
+        def __getitem__(self, k):
+            return "0"
+
+    t.replies = AnyOK()
+    enc.reset_multiturn(0)
+    cmds = [w.decode() for w in t.written[2:]]
+    assert cmds == [
+        "Ws003:064",  # select bank 3
+        "Ws000:020", "Ws000:021", "Ws000:022", "Ws000:023",  # multiturn = 0 at 0x14..0x17
+        "Ws205:072",  # key 0xCD -> 0x48
+        "Ws109:073",  # 0x6D ('m', apply multiturn) -> 0x49
+    ]
+
+
+def test_aksim2_detailed_status_read():
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON", "Ws000:064": "0", "R02:074": "0:2:8004"})
+    enc = E201_9B(t)
+    assert enc.read_detailed_status() == 0x8004
+
+
+def test_register_error_status():
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON", "Ws000:064": "4"})
+    enc = E201_9B(t)
+    with pytest.raises(EncoderError, match="Timeout"):
+        enc.read_detailed_status()

@@ -261,3 +261,35 @@ def test_open_loop_position_persists(tmp_path):
         assert ax2.get_status().dial == pytest.approx(31.5, abs=0.002)
     finally:
         ax2.close()
+
+
+def test_reset_multiturn_clears_encoder_error():
+    ax, stage = make_axis()
+    try:
+        stage.fail_encoder = True
+        time.sleep(0.3)
+        st = ax.get_status()
+        assert st.encoder_error and st.encoder_detailed_status == 1
+        ax.reset_multiturn(0)
+        st = ax.wait_idle(10)
+        assert not st.encoder_error and not st.problem, st.message
+        assert "multiturn counter reset" in st.message
+        ax.move_to(st.dial + 1.0)  # closed loop works again
+        st2 = ax.wait_idle(30)
+        assert abs(st2.dial - (st.dial + 1.0)) <= ax.params.deadband_deg
+    finally:
+        ax.close()
+
+
+def test_reset_multiturn_keeps_dial_when_valid():
+    ax, stage = make_axis(fmt=BissFrameFormat(singleturn_bits=18, multiturn_bits=16),
+                          stage_kw={"encoder_offset_deg": 3 * 360 + 50.0, "initial_angle_deg": 0.0})
+    try:
+        before = ax.get_status().dial
+        assert before == pytest.approx(3 * 360 + 50.0, abs=0.01)
+        ax.reset_multiturn(0)
+        st = ax.wait_idle(10)
+        assert st.dial == pytest.approx(before, abs=0.01)  # turn count changed, dial did not
+        assert st.encoder_counts < 1 << 18
+    finally:
+        ax.close()

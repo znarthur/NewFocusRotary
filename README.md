@@ -117,6 +117,8 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 | `:ResetLearning` | Write 1 to go back to the last calibration |
 | `:EncCounts`, `:EncSingleTurn`, `:StepCount` | Raw encoder and picomotor counters |
 | `:EncError`, `:EncWarning`, `:CommError`, `:CRCErrors` | Diagnostics |
+| `:EncDetailedStatus` | AksIM-2 detailed status register (bank 0, 0x4A), polled every 2 s when idle; -1 = not read |
+| `:ResetMultiturn` (+ `:MultiturnValue`) | Write 1 to reset the AksIM-2 multiturn counter (clears a multiturn error) |
 
 ## Moving without the encoder (open loop)
 
@@ -139,6 +141,24 @@ Open-loop accuracy is only as good as the steps/degree estimate, which is
 typically a few percent off for a picomotor.
 
 ## Troubleshooting `AksIM-2 reports position error (nE bit)`
+
+**Most common fix: reset the multiturn counter.** On multiturn AksIM-2
+encoders, a lost or invalid turn count keeps nE set even though the
+single-turn position is fine (it still follows the motion). Reset it with:
+
+* IOC: `caput $(P)$(M):ResetMultiturn 1` (sets the turns to `:MultiturnValue`, default 0).
+  If the dial was valid before, the IOC adjusts its offset so the dial does
+  not change. If the encoder was already in error, re-reference with SET mode afterwards.
+* Command line (stop the IOC first; it holds the serial port):
+  `newfocus-rotary-probe -c my.yaml reset-multiturn`
+* `newfocus-rotary-probe -c my.yaml encoder-status` prints the detailed status
+  register, which says which condition is set (bit meanings in the AksIM-2 data sheet).
+
+The reset uses the register sequence from RLS's own E201 software: write
+the value to bank 3, 0x14..0x17, write unlock key 0xCD to 0x48, then send
+command 0x6D to 0x49.
+
+If the error persists:
 
 Each BiSS frame from the AksIM-2 carries two status bits after the position:
 **nE** (error) and **nW** (warning), both active low. When nE is 0, the

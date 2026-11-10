@@ -73,6 +73,7 @@ class AxisConfig:
     stall_chunks: int = 5
     limit_margin_deg: float = 0.5  # stop a move that runs this far past a soft limit
     state_file: Optional[str] = None  # persists zero offset, turn count and learned steps/degree
+    detailed_status_period_s: float = 2.0  # poll the AksIM-2 detailed status register when idle (0 = off)
 
 
 @dataclass
@@ -110,6 +111,7 @@ class AxisStatus:
     comm_error: bool = False
     encoder_error: bool = False
     encoder_warning: bool = False
+    encoder_detailed_status: Optional[int] = None  # AksIM-2 detailed status register, if readable
     crc_errors: int = 0
     homed: bool = False
     at_high_limit: bool = False
@@ -171,6 +173,8 @@ class ClosedLoopRotaryAxis:
         self._last_accel_steps: Optional[int] = None
         self._last_tp_read = 0.0
         self._last_fault: Optional[str] = None
+        self._last_detailed_read = 0.0
+        self._detailed_status_ok = encoder is not None and hasattr(encoder, "read_detailed_status")
 
         self.status = AxisStatus(counts_per_rev=self.cpr)
         self._load_state()
@@ -278,6 +282,24 @@ class ClosedLoopRotaryAxis:
                 raise AxisError("calibration needs the encoder (UEIP=Yes)")
             self._seq += 1
             return self._enqueue("calibrate", steps=int(abs(steps)))
+
+    def reset_multiturn(self, value: int = 0) -> int:
+        """Reset the AksIM-2 multiturn counter (clears a multiturn error); keeps the dial continuous."""
+        with self._lock:
+            if self.enc is None or not hasattr(self.enc, "reset_multiturn"):
+                raise AxisError("encoder does not support a multiturn reset")
+            if self.status.busy:
+                raise AxisError("cannot reset the multiturn counter while moving")
+            self._seq += 1
+            return self._enqueue("reset_multiturn", value=int(value))
+
+    def read_detailed_status(self) -> Optional[int]:
+        if self.enc is None or not hasattr(self.enc, "read_detailed_status"):
+            return None
+        value = self.enc.read_detailed_status()
+        with self._lock:
+            self.status.encoder_detailed_status = value
+        return value
 
     def stop(self) -> None:
         with self._lock:
@@ -414,6 +436,8 @@ class ClosedLoopRotaryAxis:
                     self.status.homed = True
         elif cmd.kind == "calibrate":
             self._do_calibrate(cmd)
+        elif cmd.kind == "reset_multiturn":
+            self._do_reset_multiturn(cmd)
 
     def _stop_requested(self, cmd: _Cmd) -> bool:
         return self._stop_seq > cmd.seq or self._shutdown.is_set()
@@ -518,6 +542,7 @@ class ClosedLoopRotaryAxis:
         return steps
 
     def _idle_poll(self) -> None:
+        self._poll_detailed_status()  # first: most useful exactly when the position read fails
         try:
             self._poll_position()
             if time.monotonic() - self._last_tp_read > 1.0:
@@ -530,6 +555,20 @@ class ClosedLoopRotaryAxis:
                         self.status.message = "idle (fault cleared)"
         except HW_ERRORS as exc:
             self._comm_fault(exc)
+
+    def _poll_detailed_status(self) -> None:
+        period = self.cfg.detailed_status_period_s
+        if not self._detailed_status_ok or period <= 0:
+            return
+        if time.monotonic() - self._last_detailed_read < period:
+            return
+        self._last_detailed_read = time.monotonic()
+        try:
+            self.read_detailed_status()
+        except HW_ERRORS as exc:
+            # Register access is optional; don't let it disturb position polling.
+            log.warning("detailed status register not readable, polling disabled: %s", exc)
+            self._detailed_status_ok = False
 
     def _update_limit_flags(self) -> None:
         p = self.params
@@ -791,6 +830,43 @@ class ClosedLoopRotaryAxis:
         with self._lock:
             if not self.status.message.startswith("jog stopped"):
                 self.status.message = "jog stopped"
+
+    def _do_reset_multiturn(self, cmd: _Cmd) -> None:
+        with self._lock:
+            keep = self.params.closed_loop and self.status.valid and math.isfinite(self.status.dial)
+            dial_before = self.status.dial
+        self._set_message("resetting AksIM-2 multiturn counter")
+        self.enc.reset_multiturn(cmd.args["value"])
+        time.sleep(0.2)
+        with self._lock:
+            # The turn count changed on purpose: rebuild the unwrapped count from scratch.
+            self._total_counts = None
+            self._last_st = None
+            self._persisted_counts = None
+        try:
+            self._poll_detailed_status_now()
+            dial = self._poll_position()
+        except EncoderError as exc:
+            raise AxisError(f"multiturn reset sent, but the encoder still reports an error: {exc}") from None
+        with self._lock:
+            if self.status.encoder_error:
+                raise AxisError("multiturn reset sent, but the encoder still reports an error (nE)")
+            if keep and self.params.closed_loop:
+                self.zero_offset_deg += dial_before - dial
+                self.status.dial = self._counts_to_dial(self._total_counts)
+            self.status.homed = False
+        self._save_state(force=True)
+        self._set_message(
+            "multiturn counter reset; encoder OK"
+            + (" (dial kept)" if keep else " (re-reference the position with SET if needed)")
+        )
+
+    def _poll_detailed_status_now(self) -> None:
+        if self._detailed_status_ok:
+            try:
+                self.read_detailed_status()
+            except HW_ERRORS:
+                pass
 
     def _do_calibrate(self, cmd: _Cmd) -> None:
         n = max(self.cfg.min_learn_steps, cmd.args["steps"])

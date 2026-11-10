@@ -222,5 +222,15 @@ class SimE201:
     def read(self) -> EncoderReading:
         return decode_frame(self.read_raw(), self.fmt)
 
+    def read_detailed_status(self) -> int:
+        return 0x0001 if self.stage.fail_encoder else 0x0000
+
+    def reset_multiturn(self, value: int = 0) -> None:
+        """Like the AksIM-2: clears a multiturn error and sets the turn count."""
+        with self.stage.lock:
+            turns = math.floor(self.stage.encoder_angle() / 360.0)
+            self.stage.p.encoder_offset_deg += (value - turns) * 360.0
+            self.stage.fail_encoder = False
+
     def close(self) -> None:
         pass

@@ -119,6 +119,11 @@ class RotaryMotorIOC(PVGroup):
     enc_warning = pvproperty(name=":EncWarning", value=0, read_only=True, doc="AksIM-2 warning bit")
     comm_error = pvproperty(name=":CommError", value=0, read_only=True, doc="Communication error")
     crc_errors = pvproperty(name=":CRCErrors", value=0, read_only=True, doc="BiSS CRC failures since start")
+    enc_detailed_status = pvproperty(name=":EncDetailedStatus", value=-1, read_only=True,
+                                     doc="AksIM-2 detailed status register (-1 = not read)")
+    reset_multiturn = pvproperty(name=":ResetMultiturn", value=0,
+                                 doc="1: reset the AksIM-2 multiturn counter to :MultiturnValue")
+    multiturn_value = pvproperty(name=":MultiturnValue", value=0, doc="Turn count written by :ResetMultiturn")
 
     def __init__(self, axis: ClosedLoopRotaryAxis, cfg: Config, **kwargs):
         kwargs.setdefault("prefix", f"{cfg.ioc.prefix}{cfg.ioc.motor}")
@@ -474,6 +479,15 @@ class RotaryMotorIOC(PVGroup):
             return 1
         return 0
 
+    @reset_multiturn.putter
+    async def reset_multiturn(self, instance, value):
+        if value:
+            self._sync_val_on_done = True
+            if await self._start(self.axis.reset_multiturn, int(self.multiturn_value.value)) is None:
+                return 0
+            return 1
+        return 0
+
     @reset_learning.putter
     async def reset_learning(self, instance, value):
         if value:
@@ -548,6 +562,7 @@ class RotaryMotorIOC(PVGroup):
         for fld in (F.home_forward, F.home_reverse, F.jog_motor_forward, F.jog_motor_reverse):
             await self._w(fld, 0)
         await self._w(self.calibrate, 0)
+        await self._w(self.reset_multiturn, 0)
         if self._spmg_move_once:
             self._spmg_move_once = False
             await F.stop_pause_move_go.write("Pause", verify_value=False)
@@ -619,6 +634,8 @@ class RotaryMotorIOC(PVGroup):
         await self._w(self.enc_warning, int(st.encoder_warning))
         await self._w(self.comm_error, int(st.comm_error))
         await self._w(self.crc_errors, int(st.crc_errors))
+        if st.encoder_detailed_status is not None:
+            await self._w(self.enc_detailed_status, int(st.encoder_detailed_status))
 
         if st.comm_error:
             alarm = (AlarmStatus.COMM, AlarmSeverity.INVALID_ALARM)

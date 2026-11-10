@@ -259,3 +259,12 @@ def test_open_loop_via_ueip(ioc):
     # back on the encoder: the open-loop move was only approximately 2 deg
     assert abs(get(ioc, M + ".RBV") - (rbv + 2.0)) < 0.5
     assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)
+
+
+def test_reset_multiturn_pv(ioc):
+    assert get(ioc, M + ":EncDetailedStatus") in (0, -1)
+    put(ioc, M + ":ResetMultiturn", 1)
+    wait_dmov(ioc, 10)
+    assert get(ioc, M + ":ResetMultiturn") == 0
+    assert "multiturn counter reset" in get_str(ioc, M + ":Status")
+    assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)
