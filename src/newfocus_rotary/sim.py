@@ -30,6 +30,7 @@ class SimStageParams:
     encoder_noise_counts: float = 0.5
     initial_angle_deg: float = 10.0
     speedup: float = 1.0  # simulated time runs this much faster than wall time
+    encoder_blip_rate: float = 0.0  # probability per read of an nE blip while moving (vibration)
     seed: Optional[int] = 1234
 
 
@@ -217,7 +218,9 @@ class SimE201:
         counts = int(math.floor(counts))
         st = counts % cpr
         mt = counts // cpr
-        return encode_frame(st, self.fmt, multiturn=mt, error=self.stage.fail_encoder)
+        blip = (self.stage.p.encoder_blip_rate > 0 and self.stage.moving()
+                and self._rng.random() < self.stage.p.encoder_blip_rate)
+        return encode_frame(st, self.fmt, multiturn=mt, error=self.stage.fail_encoder or blip)
 
     def read(self) -> EncoderReading:
         return decode_frame(self.read_raw(), self.fmt)

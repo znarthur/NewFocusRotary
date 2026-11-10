@@ -118,6 +118,7 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 | `:EncCounts`, `:EncSingleTurn`, `:StepCount` | Raw encoder and picomotor counters |
 | `:EncError`, `:EncWarning`, `:CommError`, `:CRCErrors` | Diagnostics |
 | `:EncDetailedStatus` | AksIM-2 detailed status register (bank 0, 0x4A), polled every 2 s when idle; -1 = not read |
+| `:EncBlips`, `:PosEstimated` | Encoder error blips ridden through; 1 while the readback is dead-reckoned |
 | `:ResetMultiturn` (+ `:MultiturnValue`) | Write 1 to reset the AksIM-2 multiturn counter (clears a multiturn error) |
 
 ## Moving without the encoder (open loop)
@@ -139,6 +140,29 @@ If the encoder is faulty or missing, you can still drive the picomotor:
 
 Open-loop accuracy is only as good as the steps/degree estimate, which is
 typically a few percent off for a picomotor.
+
+## Riding through encoder error blips
+
+Piezo vibration (and tilt) can make the AksIM-2 flag an error for a moment
+while the motor runs. Set `axis.encoder_error_tolerance_deg` to tolerate this:
+
+* When nE appears, the position is **dead-reckoned**: last good encoder
+  reading plus picomotor steps since then, using the learned steps/degree.
+  `:PosEstimated` = 1 and the alarm is MINOR, not MAJOR.
+* Motion continues until the blind travel exceeds the tolerance. Then the
+  move stops with a fault: `... through 0.512 deg of travel (tolerance 0.5 deg)`.
+* When the motor is at rest and the encoder is still in error, the controller
+  waits up to `encoder_error_recovery_s` for it to recover (vibration
+  stops when the motor does). Otherwise: `... did not recover within 1.0 s at rest`.
+* A move is never declared in position on an estimate. The final check
+  always waits for a real encoder reading. Moves made partly blind are not
+  used to learn steps/degree.
+* After a fault, the tolerance re-arms only after a good reading, so a
+  persistent error can't hide behind repeated blips. `:EncBlips` counts episodes.
+
+Pick the tolerance from how far the stage can drift unnoticed without harm.
+Without the encoder's turn count (`use_encoder_multiturn: false`) it must be
+below 180°.
 
 ## Troubleshooting `AksIM-2 reports position error (nE bit)`
 

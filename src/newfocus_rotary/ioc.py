@@ -121,6 +121,10 @@ class RotaryMotorIOC(PVGroup):
     crc_errors = pvproperty(name=":CRCErrors", value=0, read_only=True, doc="BiSS CRC failures since start")
     enc_detailed_status = pvproperty(name=":EncDetailedStatus", value=-1, read_only=True,
                                      doc="AksIM-2 detailed status register (-1 = not read)")
+    enc_blips = pvproperty(name=":EncBlips", value=0, read_only=True,
+                           doc="Encoder error blips ridden through (dead reckoning)")
+    pos_estimated = pvproperty(name=":PosEstimated", value=0, read_only=True,
+                               doc="1 while the readback is dead-reckoned through an encoder blip")
     reset_multiturn = pvproperty(name=":ResetMultiturn", value=0,
                                  doc="1: reset the AksIM-2 multiturn counter to :MultiturnValue")
     multiturn_value = pvproperty(name=":MultiturnValue", value=0, doc="Turn count written by :ResetMultiturn")
@@ -614,7 +618,7 @@ class RotaryMotorIOC(PVGroup):
             msta |= MSTA_POSITION
         if st.stalled:
             msta |= MSTA_SLIP_STALL
-        if st.problem or (st.encoder_error and closed):
+        if st.problem or (st.encoder_error and closed and not st.position_estimated):
             msta |= MSTA_PROBLEM
         if st.moving:
             msta |= MSTA_MOVING
@@ -634,12 +638,14 @@ class RotaryMotorIOC(PVGroup):
         await self._w(self.enc_warning, int(st.encoder_warning))
         await self._w(self.comm_error, int(st.comm_error))
         await self._w(self.crc_errors, int(st.crc_errors))
+        await self._w(self.enc_blips, int(st.encoder_blips))
+        await self._w(self.pos_estimated, int(st.position_estimated))
         if st.encoder_detailed_status is not None:
             await self._w(self.enc_detailed_status, int(st.encoder_detailed_status))
 
         if st.comm_error:
             alarm = (AlarmStatus.COMM, AlarmSeverity.INVALID_ALARM)
-        elif (st.encoder_error and closed) or st.stalled or st.problem:
+        elif (st.encoder_error and closed and not st.position_estimated) or st.stalled or st.problem:
             alarm = (AlarmStatus.STATE, AlarmSeverity.MAJOR_ALARM)
         elif st.missed or st.encoder_warning or st.encoder_error or not closed:
             alarm = (AlarmStatus.STATE, AlarmSeverity.MINOR_ALARM)

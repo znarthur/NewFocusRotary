@@ -54,6 +54,9 @@ axis:
                                 # (use when the multiturn counter is unreliable, e.g. mismatch errors)
   multiturn_reference: 0        # raw encoder turn count that counts as turn 0 (e.g. 65377);
                                 # see "mt=" in "newfocus-rotary-probe encoder"
+  encoder_error_tolerance_deg: 0.0  # ride through AksIM-2 error blips during motion for up to this
+                                    # much dead-reckoned travel (deg; 0 = any error is a fault)
+  encoder_error_recovery_s: 1.0     # at rest, how long the error may last before it is a fault
 
 motor:                    # initial motor-record field values
   velocity: 1.0           # VELO  deg/s (converted to 8742 steps/s, max 2000)

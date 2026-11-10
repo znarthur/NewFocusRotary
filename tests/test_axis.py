@@ -347,3 +347,90 @@ def test_multiturn_reference_across_counter_wrap():
         assert ax.get_status().dial == pytest.approx(370.0, abs=0.01)
     finally:
         ax.close()
+
+
+def test_rides_through_encoder_blips_during_motion():
+    ax, stage = make_axis(stage_kw={"encoder_blip_rate": 0.3},
+                          cfg_kw={"encoder_error_tolerance_deg": 1.0, "encoder_error_recovery_s": 0.5})
+    try:
+        start = ax.get_status().dial
+        for target in (start + 4.0, start + 1.0):
+            ax.move_to(target)
+            st = ax.wait_idle(60)
+            assert not st.problem, st.message
+            assert abs(st.dial - target) <= ax.params.deadband_deg
+            assert not st.position_estimated  # in position is decided on a real reading
+        assert st.encoder_blips > 0
+    finally:
+        ax.close()
+
+
+def test_blips_fault_without_tolerance():
+    ax, stage = make_axis(stage_kw={"encoder_blip_rate": 0.3})
+    try:
+        ax.move_to(ax.get_status().dial + 4.0)
+        st = ax.wait_idle(60)
+        assert st.problem and "nE" in st.message
+    finally:
+        ax.close()
+
+
+def test_persistent_error_at_chunk_end_times_out_at_rest():
+    ax, stage = make_axis(cfg_kw={"encoder_error_tolerance_deg": 5.0, "encoder_error_recovery_s": 0.3})
+    try:
+        ax.move_to(ax.get_status().dial + 20.0)
+        time.sleep(0.3)
+        stage.fail_encoder = True
+        st = ax.wait_idle(30)
+        assert st.problem and "did not recover" in st.message
+    finally:
+        ax.close()
+
+
+def test_persistent_error_stops_after_tolerance():
+    tol = 0.5
+    # Long chunks: the motor keeps moving blind until the travel allowance is used up.
+    ax, stage = make_axis(cfg_kw={"encoder_error_tolerance_deg": tol, "encoder_error_recovery_s": 0.3,
+                                  "chunk_time_s": 5.0})
+    try:
+        start_angle = stage.angle
+        ax.move_to(ax.get_status().dial + 20.0)
+        time.sleep(0.3)
+        stage.fail_encoder = True
+        angle_at_fail = stage.angle
+        st = ax.wait_idle(30)
+        assert st.problem and "tolerance" in st.message
+        blind = abs(stage.angle - angle_at_fail)
+        # Stopped soon after the allowance was used up.  The margin is poll latency at the
+        # simulator's 20x speed (~18 deg/s); on hardware at 1 deg/s it is ~0.03 deg.
+        assert blind < tol + 0.6
+        assert stage.angle - start_angle < 20.0
+        # Persistent error at rest is not re-tolerated: still a fault.
+        time.sleep(0.5)
+        assert ax.get_status().problem
+    finally:
+        ax.close()
+
+
+def test_blip_at_rest_recovers_without_fault():
+    ax, stage = make_axis(cfg_kw={"encoder_error_tolerance_deg": 0.5, "encoder_error_recovery_s": 0.5})
+    try:
+        before = ax.get_status().dial
+        stage.fail_encoder = True
+        time.sleep(0.2)
+        st = ax.get_status()
+        assert st.position_estimated and not st.problem
+        assert st.dial == pytest.approx(before, abs=0.002)
+        stage.fail_encoder = False
+        time.sleep(0.3)
+        st = ax.get_status()
+        assert not st.position_estimated and not st.problem and st.encoder_blips == 1
+    finally:
+        ax.close()
+
+
+def test_tolerance_must_be_below_half_turn_without_multiturn():
+    stage = SimRotaryStage(SimStageParams())
+    with pytest.raises(ValueError):
+        ClosedLoopRotaryAxis(SimPicomotor8742(stage), SimE201(stage),
+                             AxisConfig(encoder_error_tolerance_deg=200.0))

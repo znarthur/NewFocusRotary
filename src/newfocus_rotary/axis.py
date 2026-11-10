@@ -80,6 +80,13 @@ class AxisConfig:
     # e.g. 65377; negative values are taken modulo 2^multiturn_bits).  Turns are counted
     # relative to it, wrapping correctly at the counter boundary.
     multiturn_reference: int = 0
+    # Ride through transient AksIM-2 errors (nE "blips", e.g. from piezo vibration):
+    # while the encoder reports an error, the position is dead-reckoned from the last
+    # good reading plus picomotor steps, for at most this much travel (deg; 0 = off).
+    encoder_error_tolerance_deg: float = 0.0
+    # Once the motor stands still, how long the encoder may stay in error before it is
+    # a fault.  A move is never declared in position on a dead-reckoned value.
+    encoder_error_recovery_s: float = 1.0
     detailed_status_period_s: float = 2.0  # poll the AksIM-2 detailed status register when idle (0 = off)
 
 
@@ -119,6 +126,8 @@ class AxisStatus:
     encoder_error: bool = False
     encoder_warning: bool = False
     encoder_detailed_status: Optional[int] = None  # AksIM-2 detailed status register, if readable
+    position_estimated: bool = False  # dial is dead-reckoned through an encoder error blip
+    encoder_blips: int = 0  # encoder error episodes ridden through
     crc_errors: int = 0
     homed: bool = False
     at_high_limit: bool = False
@@ -170,6 +179,16 @@ class ClosedLoopRotaryAxis:
         # Open-loop position, integrated from the 8742 step counter.
         self._ol_dial = 0.0
         self._ol_last_steps: Optional[int] = None
+        # Encoder-error ride-through ("blind" = dead reckoning from the step counter).
+        self._last_good_dial: Optional[float] = None
+        self._blind = False
+        self._blind_travel = 0.0
+        self._blind_in_chunk = False
+        self._blind_exhausted = False  # allowance used up; needs a good reading to re-arm
+        self._blind_fail = ""
+        self._last_motion_time = 0.0
+        if not self._has_multiturn and config.encoder_error_tolerance_deg >= 180.0:
+            raise ValueError("encoder_error_tolerance_deg must be < 180 when turns are counted in software")
         self.zero_offset_deg = 0.0
         self._total_counts: Optional[int] = None
         self._last_st: Optional[int] = None
@@ -500,38 +519,89 @@ class ClosedLoopRotaryAxis:
             if reading.error:
                 if not strict:
                     return self.status.dial
-                self.status.problem = True
-                self.status.valid = False
-                raise EncoderError(
-                    "AksIM-2 reports position error (nE bit); set UEIP=No to move open loop"
-                )
-            st = reading.singleturn
-            if self._has_multiturn:
-                mt = self._relative_turns(reading.multiturn)
-                total = mt * self.cpr + st
-            elif self._total_counts is None:
-                total = st
-                if self._persisted_counts is not None:
-                    k = round((self._persisted_counts - st) / self.cpr)
-                    total = st + k * self.cpr
+                estimate = self._ride_through_error()
+                if estimate is not None:
+                    dial = estimate
+                else:
+                    if self._blind:
+                        self._blind_exhausted = True
+                    self._blind = False
+                    self.status.position_estimated = False
+                    self.status.problem = True
+                    self.status.valid = False
+                    extra = f" {self._blind_fail}" if self._blind_fail else ""
+                    raise EncoderError(
+                        f"AksIM-2 reports position error (nE bit){extra}; set UEIP=No to move open loop"
+                    )
+            if reading.error:  # tolerated blip: publish the estimate
+                self.status.dial = dial
+                self._update_limit_flags()
             else:
-                half = self.cpr // 2
-                delta = (st - self._last_st + half) % self.cpr - half
-                total = self._total_counts + delta
-            self._last_st = st
-            self._total_counts = total
-            self.status.encoder_counts = total
-            self.status.encoder_singleturn = st
-            self.status.encoder_multiturn = reading.multiturn
-            if self.status.comm_error:
-                self.status.comm_error = False
-            if not strict:
-                return self.status.dial
-            self.status.dial = self._counts_to_dial(total)
-            self.status.valid = True
-            self._update_limit_flags()
-            dial = self.status.dial
-        self._notify()
+                dial = self._good_reading(reading, strict)
+        if strict:
+            self._notify()
+        return dial
+
+    def _ride_through_error(self) -> Optional[float]:
+        """Dead-reckoned dial during a tolerated encoder error, or None if not tolerated. Lock held."""
+        tol = self.cfg.encoder_error_tolerance_deg
+        if tol <= 0 or self._last_good_dial is None or self._blind_exhausted:
+            return None
+        now = time.monotonic()
+        if not self._blind:
+            self._blind = True
+            self._blind_travel = 0.0
+            self._last_motion_time = now
+            self.status.encoder_blips += 1
+            log.info("encoder error blip: dead-reckoning from %.4f deg", self._last_good_dial)
+        self._blind_in_chunk = True
+        if self._blind_travel > tol:
+            self._blind_fail = f"through {self._blind_travel:.3f} deg of travel (tolerance {tol} deg)"
+            return None
+        if now - self._last_motion_time > self.cfg.encoder_error_recovery_s:
+            # standing still and the encoder has not recovered
+            self._blind_fail = f"and did not recover within {self.cfg.encoder_error_recovery_s} s at rest"
+            return None
+        self.status.position_estimated = True
+        return self._ol_dial
+
+    def _good_reading(self, reading: EncoderReading, strict: bool) -> float:
+        """Process a valid encoder frame (lock held); returns the dial."""
+        st = reading.singleturn
+        if self._has_multiturn:
+            mt = self._relative_turns(reading.multiturn)
+            total = mt * self.cpr + st
+        elif self._total_counts is None:
+            total = st
+            if self._persisted_counts is not None:
+                k = round((self._persisted_counts - st) / self.cpr)
+                total = st + k * self.cpr
+        else:
+            half = self.cpr // 2
+            delta = (st - self._last_st + half) % self.cpr - half
+            total = self._total_counts + delta
+        self._last_st = st
+        self._total_counts = total
+        self.status.encoder_counts = total
+        self.status.encoder_singleturn = st
+        self.status.encoder_multiturn = reading.multiturn
+        if self.status.comm_error:
+            self.status.comm_error = False
+        if not strict:
+            return self.status.dial
+        dial = self._counts_to_dial(total)
+        if self._blind:
+            log.info("encoder recovered after %.4f deg of blind travel (estimate was off by %+.4f deg)",
+                     self._blind_travel, self._ol_dial - dial)
+            self._blind = False
+        self._blind_exhausted = False
+        self._blind_fail = ""
+        self.status.position_estimated = False
+        self._last_good_dial = dial
+        self._ol_dial = dial  # dead reckoning restarts from every good reading
+        self.status.dial = dial
+        self.status.valid = True
+        self._update_limit_flags()
         return dial
 
     def _relative_turns(self, raw_mt: int) -> int:
@@ -549,7 +619,11 @@ class ClosedLoopRotaryAxis:
             if self._ol_last_steps is not None:
                 delta = steps - self._ol_last_steps
                 if delta:
-                    self._ol_dial += delta / self.spd[1 if delta > 0 else -1]
+                    d_deg = delta / self.spd[1 if delta > 0 else -1]
+                    self._ol_dial += d_deg
+                    self._last_motion_time = time.monotonic()
+                    if self._blind:
+                        self._blind_travel += abs(d_deg)
             self._ol_last_steps = steps
         self._last_tp_read = time.monotonic()
         return steps
@@ -642,6 +716,8 @@ class ClosedLoopRotaryAxis:
         outcome = "done"
         while True:
             time.sleep(self.cfg.poll_period_s)
+            if self.cfg.encoder_error_tolerance_deg > 0 and self.params.closed_loop:
+                self._read_steps()  # keeps the dead-reckoning estimate current
             dial = self._poll_position()
             if self._stop_requested(cmd):
                 outcome = "stopped"
@@ -662,6 +738,21 @@ class ClosedLoopRotaryAxis:
             if time.monotonic() > deadline:
                 self.pm.stop(ax)
                 raise AxisError("8742 did not report motion done in time")
+
+    def _await_encoder(self, cmd: _Cmd) -> Optional[float]:
+        """Motor at rest during an encoder blip: wait for a good reading.
+
+        Returns the measured dial, or None on stop/retarget.  Raises EncoderError
+        (via _poll_position) if the error outlasts encoder_error_recovery_s.
+        """
+        self._set_message("waiting for encoder to recover")
+        while True:
+            if self._stop_requested(cmd) or self._retargeted:
+                return None
+            time.sleep(self.cfg.poll_period_s)
+            dial = self._poll_position()
+            if not self._blind:
+                return dial
 
     def _drain_motion(self, cmd: _Cmd) -> None:
         ax = self.cfg.picomotor_axis
@@ -684,8 +775,9 @@ class ClosedLoopRotaryAxis:
         with self._lock:
             self.status.moving = True
             self.status.direction = 1 if steps > 0 else -1
-        dial0 = self._poll_position()
+            self._blind_in_chunk = self._blind
         tp0 = self._read_steps()
+        dial0 = self._poll_position()
         v = self._last_velocity_steps or MAX_VELOCITY
         self.pm.move_relative(ax, steps)
         outcome = self._wait_motion(cmd, abs(steps) / v, early)
@@ -693,8 +785,8 @@ class ClosedLoopRotaryAxis:
             self.status.moving = False
         if self.cfg.settle_time_s > 0:
             time.sleep(self.cfg.settle_time_s)
-        dial1 = self._poll_position()
         tp1 = self._read_steps()
+        dial1 = self._poll_position()
         return outcome, tp1 - tp0, dial1 - dial0
 
     def _learn(self, direction: int, steps_done: int, moved: float) -> None:
@@ -725,6 +817,10 @@ class ClosedLoopRotaryAxis:
             if self._retargeted:
                 return "retarget"
             dial = self._poll_position()
+            if self._blind:
+                dial = self._await_encoder(cmd)
+                if dial is None:
+                    return "stopped" if self._stop_requested(cmd) else "retarget"
             err = goal - dial
             if abs(err) <= deadband:
                 return "done"
@@ -758,6 +854,8 @@ class ClosedLoopRotaryAxis:
             outcome, steps_done, moved = self._chunk(cmd, direction * nsteps, early)
             if outcome in ("stopped", "retarget"):
                 return outcome
+            if self._blind_in_chunk:
+                continue  # moved partly on an estimate: don't learn or judge stalls from it
             self._learn(direction, steps_done, moved)
 
             expected = abs(steps_done) / spd if spd else 0.0
