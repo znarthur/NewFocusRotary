@@ -145,7 +145,7 @@ def test_aksim2_multiturn_reset_sequence():
             return "0"
 
     t.replies = AnyOK()
-    enc.reset_multiturn(0)
+    enc.set_multiturn(0)
     cmds = [w.decode() for w in t.written[2:]]
     assert cmds == [
         "Ws003:064",  # select bank 3
@@ -183,7 +183,58 @@ def test_multiturn_reset_falls_back_to_key_first():
     t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
     enc = E201_9B(t, BissFrameFormat(singleturn_bits=18, multiturn_bits=16))
     t.replies = Locking()
-    assert enc.reset_multiturn(0) == "key, value, key, apply"
+    assert enc.set_multiturn(0) == "multiturn set to 0 (key, value, key, apply)"
     cmds = [w.decode() for w in t.written[2:]]
     assert cmds[:3] == ["Ws003:064", "Ws000:020", "Ws205:072"]
     assert cmds[-2:] == ["Ws205:072", "Ws109:073"]
+
+
+def _mt_fmt():
+    return BissFrameFormat(singleturn_bits=18, multiturn_bits=16)
+
+
+class StatefulE201(dict):
+    """Fake E201 + AksIM-2: value writes rejected; error cleared by 'b' or power cycle."""
+
+    def __init__(self, clear_with):
+        super().__init__()
+        self.error = True
+        self.clear_with = clear_with
+        self.log = []
+
+    def __getitem__(self, k):
+        self.log.append(k)
+        if k == "4":
+            return encode_frame(1000, _mt_fmt(), multiturn=5, error=self.error).hex()
+        if k.endswith(":020"):
+            return "Error"  # multiturn value register locked, as on the real unit
+        if k == "Ws098:073" and self.clear_with == "b":
+            self.error = False
+        if k == "N" and self.clear_with == "power":
+            self.error = False
+        return {"F": "Power OFF", "N": "Power ON"}.get(k, "0")
+
+
+@pytest.mark.parametrize("clear_with,expect", [("b", "command 'b'"), ("power", "power cycle")])
+def test_reset_multiturn_fallback_chain(clear_with, expect):
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, _mt_fmt())
+    t.replies = StatefulE201(clear_with)
+    assert expect in enc.reset_multiturn(0)
+    assert not enc.read().error
+
+
+def test_reset_multiturn_reports_all_failures():
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, _mt_fmt())
+    t.replies = StatefulE201("never")
+    with pytest.raises(EncoderError, match="set value.*command 'b'.*power cycle"):
+        enc.reset_multiturn(0)
+
+
+def test_describe_detailed_status():
+    from newfocus_rotary.e201 import describe_detailed_status
+
+    lines = describe_detailed_status(0x8204)
+    assert lines[0].startswith("bit 15: multiturn counter mismatch")
+    assert [l.split(":")[0] for l in lines] == ["bit 15", "bit 9", "bit 2"]

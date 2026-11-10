@@ -266,5 +266,5 @@ def test_reset_multiturn_pv(ioc):
     put(ioc, M + ":ResetMultiturn", 1)
     wait_dmov(ioc, 10)
     assert get(ioc, M + ":ResetMultiturn") == 0
-    assert "multiturn counter reset" in get_str(ioc, M + ":Status")
+    assert "encoder OK" in get_str(ioc, M + ":Status")
     assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)

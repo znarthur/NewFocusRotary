@@ -102,8 +102,8 @@ class RotaryMotorIOC(PVGroup):
                        doc="Closed-loop rotary picomotor")
 
     status_msg = pvproperty(name=":Status", value="starting", dtype=ChannelType.CHAR,
-                            max_length=256, report_as_string=True, read_only=True,
-                            doc="Controller status message")
+                            max_length=256, report_as_string=False, read_only=True,
+                            doc="Controller status message (char waveform; caget -S)")
     steps_per_deg_fwd = pvproperty(name=":StepsPerDegFwd", value=0.0, precision=2,
                                    doc="Learned picomotor steps per degree, positive direction")
     steps_per_deg_rev = pvproperty(name=":StepsPerDegRev", value=0.0, precision=2,

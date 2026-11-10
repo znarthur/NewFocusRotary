@@ -111,9 +111,11 @@ def cmd_encoder_status(args) -> int:
     _print_reading(enc)
     try:
         st = enc.read_detailed_status()
-        print(f"  AksIM-2 detailed status (bank 0, 0x4A): 0x{st:04X}  bits set: "
-              f"{[b for b in range(16) if st >> b & 1] or 'none'}")
-        print("  (bit meanings: AksIM-2 data sheet, 'detailed status' register)")
+        from .e201 import describe_detailed_status
+
+        print(f"  AksIM-2 detailed status (bank 0, 0x4A): 0x{st:04X}")
+        for line in describe_detailed_status(st) or ["no bits set"]:
+            print(f"    {line}")
     except Exception as exc:
         print(f"  detailed status not readable: {exc}")
     enc.close()
@@ -126,8 +128,15 @@ def cmd_reset_multiturn(args) -> int:
     print(f"{port}: {enc.version}")
     print("before:")
     _print_reading(enc)
-    variant = enc.reset_multiturn(args.value)
-    print(f"accepted write sequence: {variant}")
+    from .e201 import EncoderError
+
+    try:
+        result = enc.reset_multiturn(args.value)
+    except EncoderError as exc:
+        print(f"FAILED: {exc}")
+        enc.close()
+        return 1
+    print(f"result: {result}")
     time.sleep(0.2)
     print(f"after setting multiturn = {args.value}:")
     _print_reading(enc)

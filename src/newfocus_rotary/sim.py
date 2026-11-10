@@ -231,6 +231,7 @@ class SimE201:
             turns = math.floor(self.stage.encoder_angle() / 360.0)
             self.stage.p.encoder_offset_deg += (value - turns) * 360.0
             self.stage.fail_encoder = False
+        return f"multiturn set to {value} (simulated)"
 
     def close(self) -> None:
         pass

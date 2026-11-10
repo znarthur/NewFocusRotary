@@ -273,7 +273,7 @@ def test_reset_multiturn_clears_encoder_error():
         ax.reset_multiturn(0)
         st = ax.wait_idle(10)
         assert not st.encoder_error and not st.problem, st.message
-        assert "multiturn counter reset" in st.message
+        assert "encoder OK" in st.message
         ax.move_to(st.dial + 1.0)  # closed loop works again
         st2 = ax.wait_idle(30)
         assert abs(st2.dial - (st.dial + 1.0)) <= ax.params.deadband_deg

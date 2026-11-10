@@ -836,7 +836,7 @@ class ClosedLoopRotaryAxis:
             keep = self.params.closed_loop and self.status.valid and math.isfinite(self.status.dial)
             dial_before = self.status.dial
         self._set_message("resetting AksIM-2 multiturn counter")
-        self.enc.reset_multiturn(cmd.args["value"])
+        result = self.enc.reset_multiturn(cmd.args["value"]) or "multiturn reset"
         time.sleep(0.2)
         with self._lock:
             # The turn count changed on purpose: rebuild the unwrapped count from scratch.
@@ -857,7 +857,7 @@ class ClosedLoopRotaryAxis:
             self.status.homed = False
         self._save_state(force=True)
         self._set_message(
-            "multiturn counter reset; encoder OK"
+            f"{result}; encoder OK"
             + (" (dial kept)" if keep else " (re-reference the position with SET if needed)")
         )
 

@@ -111,7 +111,7 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 
 | PV | |
 |---|---|
-| `:Status` | Text status, e.g. `in position (+0.00031 deg, 1 retries)` |
+| `:Status` | Text status (char waveform: `caget -S`), e.g. `in position (+0.00031 deg, 1 retries)` |
 | `:StepsPerDegFwd`, `:StepsPerDegRev` | Learned step size for each direction (writable) |
 | `:Calibrate` (+ `:CalibrateSteps`) | Write 1 to measure steps/degree with a ± move |
 | `:ResetLearning` | Write 1 to go back to the last calibration |
@@ -146,6 +146,12 @@ typically a few percent off for a picomotor.
 encoders, a lost or invalid turn count keeps nE set even though the
 single-turn position is fine (it still follows the motion). Reset it with:
 
+Detailed status bit 15 = **multiturn counter mismatch** (AksIM-2 BiSS
+application note MBD02). The reset tries, in order: (1) writing a new
+multiturn value, (2) command `'b'` to the command register, which clears the
+error and keeps the turn count, (3) power-cycling the encoder through the
+E201 (`F`/`N`). It reports which one worked.
+
 * IOC: `caput $(P)$(M):ResetMultiturn 1` (sets the turns to `:MultiturnValue`, default 0).
   If the dial was valid before, the IOC adjusts its offset so the dial does
   not change. If the encoder was already in error, re-reference with SET mode afterwards.
@@ -154,9 +160,10 @@ single-turn position is fine (it still follows the motion). Reset it with:
 * `newfocus-rotary-probe -c my.yaml encoder-status` prints the detailed status
   register, which says which condition is set (bit meanings in the AksIM-2 data sheet).
 
-The reset uses the register sequence from RLS's own E201 software: write
-the value to bank 3, 0x14..0x17, write unlock key 0xCD to 0x48, then send
-command 0x6D to 0x49.
+The value write uses the register sequence from RLS's own E201 software:
+write the value to bank 3, 0x14..0x17, write unlock key 0xCD to 0x48, then
+send command 0x6D to 0x49. On at least one unit that write is rejected,
+hence the fallbacks.
 
 If the error persists:
 

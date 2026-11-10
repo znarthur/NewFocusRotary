@@ -28,8 +28,10 @@ AksIM-2 registers (RLS ``registers_preset.py``, ``aksim2_preset``):
 
 * multiturn value: bank 3, 0x14..0x17 (32 bit, big endian)
 * unlock key: write 0xCD to 0x48 before a command
-* command register 0x49: 0x6D (``m``) = apply multiturn value
-* detailed status: bank 0, 0x4A..0x4B (16 bit)
+* command register 0x49: 0x6D (``m``) = apply multiturn value,
+  0x62 (``b``) = clear the multiturn error (RLS application note MBD02)
+* detailed status: bank 0, 0x4A..0x4B (16 bit); bit 15 = multiturn counter
+  mismatch.  That error also clears on an encoder power cycle.
 """
 
 from __future__ import annotations
@@ -69,6 +71,21 @@ AKSIM2_KEY_ADDR = 0x48
 AKSIM2_KEY = 0xCD
 AKSIM2_COMMAND_ADDR = 0x49
 AKSIM2_CMD_SET_MULTITURN = 0x6D
+AKSIM2_CMD_CLEAR_MULTITURN_ERROR = 0x62  # 'b'
+AKSIM2_STATUS_MULTITURN_MISMATCH = 1 << 15
+
+# Detailed-status bits whose meaning is confirmed (MBD02).  Others: see the application note.
+AKSIM2_DETAILED_STATUS_BITS = {
+    15: "multiturn counter mismatch (clear: write multiturn, command 'b', or power cycle)",
+}
+
+
+def describe_detailed_status(value: int) -> list[str]:
+    out = []
+    for bit in range(15, -1, -1):
+        if value >> bit & 1:
+            out.append(f"bit {bit}: " + AKSIM2_DETAILED_STATUS_BITS.get(bit, "see AksIM-2 BiSS app note MBD02"))
+    return out
 AKSIM2_MULTITURN_BANK = 3
 AKSIM2_MULTITURN_ADDR = 0x14
 AKSIM2_DETAILED_STATUS_BANK = 0
@@ -322,12 +339,10 @@ class E201_9B:
         raw = self.read_registers(AKSIM2_DETAILED_STATUS_BANK, AKSIM2_DETAILED_STATUS_ADDR, AKSIM2_DETAILED_STATUS_LEN)
         return int.from_bytes(raw, "big")
 
-    def reset_multiturn(self, value: int = 0) -> str:
-        """Set the AksIM-2 multiturn counter.  Returns which write sequence was accepted.
+    def set_multiturn(self, value: int = 0) -> str:
+        """Write a new multiturn value.  Returns which write sequence was accepted.
 
-        First tries RLS's sequence (value, key, apply).  If the encoder rejects the
-        value write (as seen on some units: the registers are locked), retries
-        with the unlock key written first.
+        Tries RLS's sequence (value, key, apply), then with the unlock key first.
         """
         data = int(value).to_bytes(4, "big", signed=value < 0)
         with self.lock:
@@ -347,7 +362,52 @@ class E201_9B:
             self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
             self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_SET_MULTITURN)
             time.sleep(0.1)
-        return variant
+        return f"multiturn set to {value} ({variant})"
+
+    def clear_multiturn_error_command(self) -> None:
+        """Command 'b' to the command register (clears the multiturn mismatch error)."""
+        with self.lock:
+            self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
+            self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_CLEAR_MULTITURN_ERROR)
+            time.sleep(0.1)
+
+    def power_cycle(self, off_s: float = 0.3) -> None:
+        with self.lock:
+            self.query("F")
+            time.sleep(off_s)
+            reply = self.query("N")
+            if "ON" not in reply.upper():
+                raise EncoderError(f"Encoder power-on failed: {reply!r}")
+            time.sleep(0.3)
+
+    def reset_multiturn(self, value: int = 0) -> str:
+        """Clear a multiturn error, trying in order:
+
+        1. write the multiturn value (sets the turn count and clears the error),
+        2. command 'b' (clears the error, turn count unchanged),
+        3. power-cycle the encoder through the E201.
+
+        Returns a description of what worked; raises EncoderError if the error
+        remains after all three.
+        """
+        attempts = []
+        steps = [
+            ("set value", lambda: self.set_multiturn(value)),
+            ("command 'b'", lambda: (self.clear_multiturn_error_command(), "cleared with command 'b'")[1]),
+            ("power cycle", lambda: (self.power_cycle(), "cleared by encoder power cycle")[1]),
+        ]
+        with self.lock:
+            for name, fn in steps:
+                try:
+                    result = fn()
+                except EncoderError as exc:
+                    attempts.append(f"{name}: {exc}")
+                    continue
+                time.sleep(0.1)
+                if not self.read().error:
+                    return result
+                attempts.append(f"{name}: accepted, but the error bit is still set")
+        raise EncoderError("multiturn error not cleared; " + " | ".join(attempts))
 
     def power_off(self) -> None:
         self.query("F")
