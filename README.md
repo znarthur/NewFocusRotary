@@ -167,10 +167,19 @@ hence the fallbacks.
 
 **Dial wildly off after a multiturn error?** The `'b'` command and power cycle
 clear the error but keep the turn count. A count like `mt=65377` (−159 turns,
-signed) puts the dial near −56,900°. If the counter can't be trusted, set
-`axis.use_encoder_multiturn: false`: the IOC then ignores the encoder's turn
-count, counts turns itself from the single-turn angle, and discards turn
-counts saved under the old setting. Then re-reference once with SET mode
+signed) puts the dial near −56,900°. Two options:
+
+* **Keep using the encoder's turn counter, with that value as turn 0:** set
+  `axis.multiturn_reference: 65377` (the raw `mt=` value printed by
+  `newfocus-rotary-probe encoder`). Turns count relative to it, wrapping
+  correctly at the 16-bit boundary, so one turn below reads −1. The count stays
+  absolute across IOC restarts and power cycles, as long as the encoder keeps
+  counting. If the counter is ever reset or changes, update the reference.
+* **Ignore the encoder's turn count:** set `axis.use_encoder_multiturn: false`.
+  The IOC counts turns itself from the single-turn angle and discards turn
+  counts saved under the old setting.
+
+Then re-reference once with SET mode if needed
 (`caput $(P)$(M).SET 1; caput $(P)$(M) <true angle>; caput $(P)$(M).SET 0`).
 
 If the error persists:

@@ -318,3 +318,32 @@ def test_ignore_unreliable_multiturn_count(tmp_path):
         assert st.dial == pytest.approx(100.0, abs=ax.params.deadband_deg)
     finally:
         ax.close()
+
+
+@pytest.mark.parametrize("reference", [65377, -159])
+def test_multiturn_reference_is_turn_zero(reference):
+    # Real unit: 18+16 bit AksIM-2 whose turn count reads 65377 (0xFF61).
+    ax, stage = make_axis(fmt=BissFrameFormat(singleturn_bits=18, multiturn_bits=16),
+                          stage_kw={"encoder_offset_deg": -159 * 360 + 3.0, "initial_angle_deg": 0.0},
+                          cfg_kw={"multiturn_reference": reference})
+    try:
+        st = ax.get_status()
+        assert st.encoder_multiturn == 65377
+        assert st.dial == pytest.approx(3.0, abs=0.01)
+        ax.move_to(-5.0)  # below the reference turn: one turn lower, still counted by the encoder
+        st = ax.wait_idle(60)
+        assert st.dial == pytest.approx(-5.0, abs=ax.params.deadband_deg)
+        assert st.encoder_multiturn == 65376
+    finally:
+        ax.close()
+
+
+def test_multiturn_reference_across_counter_wrap():
+    # Reference just below the 16-bit wrap: raw turn 0 is one turn above it.
+    ax, stage = make_axis(fmt=BissFrameFormat(singleturn_bits=18, multiturn_bits=16),
+                          stage_kw={"encoder_offset_deg": 10.0, "initial_angle_deg": 0.0},
+                          cfg_kw={"multiturn_reference": 65535})
+    try:
+        assert ax.get_status().dial == pytest.approx(370.0, abs=0.01)
+    finally:
+        ax.close()

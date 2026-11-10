@@ -76,6 +76,10 @@ class AxisConfig:
     # Use the encoder's own multiturn count.  False: ignore it and count turns in
     # software from the single-turn angle (use when the multiturn counter is unreliable).
     use_encoder_multiturn: bool = True
+    # Raw encoder turn count treated as turn 0 (as printed by "newfocus-rotary-probe encoder",
+    # e.g. 65377; negative values are taken modulo 2^multiturn_bits).  Turns are counted
+    # relative to it, wrapping correctly at the counter boundary.
+    multiturn_reference: int = 0
     detailed_status_period_s: float = 2.0  # poll the AksIM-2 detailed status register when idle (0 = off)
 
 
@@ -503,10 +507,7 @@ class ClosedLoopRotaryAxis:
                 )
             st = reading.singleturn
             if self._has_multiturn:
-                mt_bits = self.enc.fmt.multiturn_bits
-                mt = reading.multiturn
-                if mt >= 1 << (mt_bits - 1):  # signed multiturn
-                    mt -= 1 << mt_bits
+                mt = self._relative_turns(reading.multiturn)
                 total = mt * self.cpr + st
             elif self._total_counts is None:
                 total = st
@@ -532,6 +533,14 @@ class ClosedLoopRotaryAxis:
             dial = self.status.dial
         self._notify()
         return dial
+
+    def _relative_turns(self, raw_mt: int) -> int:
+        """Turn count relative to ``multiturn_reference``, as a signed value."""
+        span = 1 << self.enc.fmt.multiturn_bits
+        mt = (raw_mt - self.cfg.multiturn_reference) % span
+        if mt >= span // 2:
+            mt -= span
+        return mt
 
     def _read_steps(self) -> int:
         steps = self.pm.position(self.cfg.picomotor_axis)
