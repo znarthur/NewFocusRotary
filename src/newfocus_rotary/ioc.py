@@ -128,6 +128,8 @@ class RotaryMotorIOC(PVGroup):
     reset_multiturn = pvproperty(name=":ResetMultiturn", value=0,
                                  doc="1: reset the AksIM-2 multiturn counter to :MultiturnValue")
     multiturn_value = pvproperty(name=":MultiturnValue", value=0, doc="Turn count written by :ResetMultiturn")
+    zero_preset = pvproperty(name=":ZeroPreset", value=0,
+                             doc="1: store the current position as AksIM-2 zero (writes encoder flash)")
 
     def __init__(self, axis: ClosedLoopRotaryAxis, cfg: Config, **kwargs):
         kwargs.setdefault("prefix", f"{cfg.ioc.prefix}{cfg.ioc.motor}")
@@ -492,6 +494,15 @@ class RotaryMotorIOC(PVGroup):
             return 1
         return 0
 
+    @zero_preset.putter
+    async def zero_preset(self, instance, value):
+        if value:
+            self._sync_val_on_done = True
+            if await self._start(self.axis.zero_preset) is None:
+                return 0
+            return 1
+        return 0
+
     @reset_learning.putter
     async def reset_learning(self, instance, value):
         if value:
@@ -567,6 +578,7 @@ class RotaryMotorIOC(PVGroup):
             await self._w(fld, 0)
         await self._w(self.calibrate, 0)
         await self._w(self.reset_multiturn, 0)
+        await self._w(self.zero_preset, 0)
         if self._spmg_move_once:
             self._spmg_move_once = False
             await F.stop_pause_move_go.write("Pause", verify_value=False)

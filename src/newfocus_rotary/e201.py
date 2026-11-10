@@ -75,6 +75,12 @@ AKSIM2_KEY = 0xCD
 AKSIM2_COMMAND_ADDR = 0x49
 AKSIM2_CMD_SET_MULTITURN = 0x6D
 AKSIM2_CMD_CLEAR_MULTITURN_ERROR = 0x62  # 'b'
+AKSIM2_CMD_SAVE = 0x63  # 'c': store configuration to non-volatile memory
+# Bank 0, 0x00..0x03: position offset (single-turn counts); output = (raw - offset) mod 2^ST.
+# EncoSight's zero preset rewrites 0x00..0x13 and 0x18 (other values unchanged) before saving.
+AKSIM2_OFFSET_ADDR = 0x00
+AKSIM2_CONFIG_BLOCK_LEN = 0x14
+AKSIM2_CONFIG_EXTRA_ADDR = 0x18
 AKSIM2_STATUS_MULTITURN_MISMATCH = 1 << 15
 
 # Detailed-status bits whose meaning is confirmed (MBD02).  Others: see the application note.
@@ -380,6 +386,60 @@ class E201_9B:
             if "ON" not in reply.upper():
                 raise EncoderError(f"Encoder power-on failed: {reply!r}")
             time.sleep(0.3)
+
+    def read_position_offset(self) -> int:
+        return int.from_bytes(self.read_registers(0, AKSIM2_OFFSET_ADDR, 4), "big")
+
+    def _stable_singleturn(self, n: int = 5, tolerance: int = 16) -> int:
+        """Median of ``n`` valid readings; refuses if the encoder is moving or in error."""
+        cpr = self.fmt.counts_per_rev
+        vals = []
+        for _ in range(n):
+            r = self.read()
+            if not r.crc_ok or r.error:
+                raise EncoderError("zero preset needs a valid encoder reading (CRC ok, no nE)")
+            vals.append(r.singleturn)
+        ref = vals[0]
+        deltas = sorted((v - ref + cpr // 2) % cpr - cpr // 2 for v in vals)
+        if deltas[-1] - deltas[0] > tolerance:
+            raise EncoderError("encoder position not stable; stop the motor before a zero preset")
+        return (ref + deltas[len(deltas) // 2]) % cpr
+
+    def zero_preset(self, off_s: float = 1.8) -> str:
+        """Make the current position read 0 (single-turn 0, multiturn 0), stored in the encoder.
+
+        Replays RLS EncoSight 5.0.0.17's "Zero preset" exactly, as captured on a real
+        AksIM-2 / E201-9B: read bank 0, multiturn <- 0, write the new position offset
+        (with the rest of 0x00..0x13 and 0x18 unchanged), key + 'c' (save to flash),
+        power-cycle the encoder, multiturn <- 0 again.  Writes the encoder's
+        non-volatile memory, so use it for commissioning, not routinely.
+        """
+        cpr = self.fmt.counts_per_rev
+        with self.lock:
+            self.select_bank(0)
+            block = bytearray(self.read_registers(None, 0x00, 64))
+            old_offset = int.from_bytes(block[0:4], "big")
+            st = self._stable_singleturn()
+            new_offset = (st + old_offset) % cpr  # raw position of "here"
+            self.set_multiturn(0)
+            block[0:4] = new_offset.to_bytes(4, "big")
+            self.write_registers(0, 0x00, bytes(block[:AKSIM2_CONFIG_BLOCK_LEN]))
+            self.write_register(AKSIM2_CONFIG_EXTRA_ADDR, block[AKSIM2_CONFIG_EXTRA_ADDR])
+            self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
+            self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_SAVE)
+            time.sleep(0.2)
+            # The encoder reports nE until restarted with the new offset.
+            self.power_cycle(off_s=off_s)
+            self.set_multiturn(0)
+            time.sleep(0.1)
+            r = self.read()
+        after = (r.singleturn + cpr // 2) % cpr - cpr // 2
+        if r.error or not r.crc_ok or abs(after) > 64:
+            raise EncoderError(
+                f"zero preset written (offset {old_offset} -> {new_offset}) but the encoder reads "
+                f"st={r.singleturn} mt={r.multiturn} err={int(r.error)}; check with encoder-status"
+            )
+        return f"zero preset: offset {old_offset} -> {new_offset}, now st={r.singleturn} mt={r.multiturn}"
 
     def reset_multiturn(self, value: int = 0) -> str:
         """Clear a multiturn error, trying in order:

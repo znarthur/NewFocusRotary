@@ -236,5 +236,14 @@ class SimE201:
             self.stage.fail_encoder = False
         return f"multiturn set to {value} (simulated)"
 
+    def zero_preset(self) -> str:
+        """Like the AksIM-2 zero preset: the current position becomes encoder 0, turn 0."""
+        with self.stage.lock:
+            self.stage.advance()
+            bias = getattr(self, "zero_preset_bias_counts", 0.0) * 360.0 / self.fmt.counts_per_rev
+            self.stage.p.encoder_offset_deg = -self.stage.p.encoder_sign * self.stage.angle + bias
+            self.stage.fail_encoder = False
+        return "zero preset (simulated)"
+
     def close(self) -> None:
         pass

@@ -240,3 +240,97 @@ def test_describe_detailed_status():
     lines = describe_detailed_status(0x8204)
     assert lines[0].startswith("bit 15: multiturn counter mismatch")
     assert [l.split(":")[0] for l in lines] == ["bit 15", "bit 9", "bit 2"]
+
+
+# RLS EncoSight "Zero preset" on a real AksIM-2 (18+16 bit) / E201-9B, captured with
+# e201_sniff.py: every register write and power command, in order (reads omitted).
+ENCOSIGHT_ZERO_PRESET = (
+    ["Ws000:064"]  # select bank 0, then R64:000 (read the config block)
+    + ENCOSIGHT_SET_MULTITURN_0
+    + ["Ws000:064",  # write back 0x00..0x13 with the new offset 0x000238BD, rest unchanged
+       "Ws000:000", "Ws002:001", "Ws056:002", "Ws189:003",
+       "Ws000:004", "Ws000:005", "Ws000:006", "Ws180:007",
+       "Ws000:008", "Ws000:009", "Ws000:010", "Ws100:011",
+       "Ws000:012", "Ws000:013", "Ws000:014", "Ws150:015",
+       "Ws000:016", "Ws000:017", "Ws000:018", "Ws000:019",
+       "Ws064:024",  # 0x18 unchanged
+       "Ws205:072", "Ws099:073",  # key, 'c' = save to flash
+       "F", "N"]  # encoder power cycle
+    + ENCOSIGHT_SET_MULTITURN_0
+)
+# Bank 0 as read by EncoSight before the preset (R64:000).
+BANK0_BEFORE = bytes.fromhex(
+    "0003f5b3000000b4000000640000009600000000000000004001680000000000"
+    "000a0000000000000000000021805a00020009000b27213f79511a070d1733e6")
+
+
+class FakeAksim2(dict):
+    """E201-9B + AksIM-2 register model: output = (raw - offset) mod 2^ST."""
+
+    def __init__(self, raw_st):
+        super().__init__()
+        self.fmt = _mt_fmt()
+        self.bank = 0
+        self.regs = {0: bytearray(BANK0_BEFORE)}
+        self.raw = raw_st
+        self.offset = int.from_bytes(BANK0_BEFORE[:4], "big")  # active offset
+        self.mt = 65528
+        self.saved_unapplied = False
+        self.powered = True
+
+    def __getitem__(self, k):
+        if k == "4":
+            st = (self.raw - self.offset) % self.fmt.counts_per_rev
+            return encode_frame(st, self.fmt, multiturn=self.mt, error=self.saved_unapplied,
+                                warning=True).hex()
+        if k == "F":
+            self.powered = False
+            return "OFF"
+        if k == "N":
+            self.powered = True
+            if self.saved_unapplied:
+                self.offset = int.from_bytes(self.regs[0][:4], "big")
+                self.saved_unapplied = False
+            return "ON"
+        if k.startswith("R"):
+            n, addr = int(k[1:3]), int(k[4:7])
+            return "0:00:" + bytes(self.regs.setdefault(self.bank, bytearray(64))[addr:addr + n]).hex()
+        if k.startswith("Ws"):
+            val, addr = int(k[2:5]), int(k[6:9])
+            if addr == 0x40:
+                self.bank = val
+            elif addr == 0x49 and val == 0x6D:
+                self.mt = int.from_bytes(self.regs[0][0x14:0x18], "big")
+            elif addr == 0x49 and val == 0x63:
+                self.saved_unapplied = True
+            elif addr < 0x40:
+                self.regs.setdefault(self.bank, bytearray(64))[addr] = val
+            return "0"
+        return {"v": "E201-9B v1.0"}[k]
+
+
+def test_zero_preset_matches_encosight_capture():
+    # Encoder output 148234 with offset 259507 => raw 145597, the offset EncoSight wrote.
+    raw = (148234 + 259507) % 2**18
+    fake = FakeAksim2(raw)
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, _mt_fmt())
+    t.replies = fake
+    msg = enc.zero_preset(off_s=0.0)
+    sent = [w.decode() for w in t.written[2:]]
+    writes = [c for c in sent if c.startswith("W") or c in ("F", "N")]
+    assert writes == ENCOSIGHT_ZERO_PRESET
+    assert "259507 -> 145597" in msg
+    r = enc.read()
+    assert (r.singleturn, r.multiturn, r.error) == (0, 0, False)
+
+
+def test_zero_preset_refuses_while_moving_or_in_error():
+    fake = FakeAksim2(1000)
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, _mt_fmt())
+    t.replies = fake
+    fake.saved_unapplied = True  # encoder reports nE
+    with pytest.raises(EncoderError, match="valid encoder reading"):
+        enc.zero_preset(off_s=0.0)
+    assert not any(w.decode().startswith("Ws") and w.decode() != "Ws000:064" for w in t.written[2:])

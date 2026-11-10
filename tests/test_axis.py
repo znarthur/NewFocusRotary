@@ -434,3 +434,36 @@ def test_tolerance_must_be_below_half_turn_without_multiturn():
     with pytest.raises(ValueError):
         ClosedLoopRotaryAxis(SimPicomotor8742(stage), SimE201(stage),
                              AxisConfig(encoder_error_tolerance_deg=200.0))
+
+
+def test_zero_preset_makes_dial_zero(tmp_path):
+    ax, stage = make_axis(tmp_path, fmt=BissFrameFormat(singleturn_bits=18, multiturn_bits=16),
+                          stage_kw={"encoder_offset_deg": -159 * 360 + 203.57, "initial_angle_deg": 0.0},
+                          cfg_kw={"multiturn_reference": 65377})
+    try:
+        ax.set_dial_position(42.0)
+        ax.zero_preset()
+        st = ax.wait_idle(10)
+        assert not st.problem, st.message
+        assert st.dial == pytest.approx(0.0, abs=0.002)
+        assert "multiturn_reference: 0" in st.message
+        assert st.encoder_multiturn == 0
+        ax.move_to(5.0)
+        st = ax.wait_idle(30)
+        assert st.dial == pytest.approx(5.0, abs=ax.params.deadband_deg)
+    finally:
+        ax.close()
+
+
+def test_zero_preset_noise_below_zero_reads_negative_not_360():
+    # Single-turn encoder: right after the preset the encoder may read cpr-1 rather than 0;
+    # the dial must come out just below 0, not near 360.
+    ax, stage = make_axis(stage_kw={"encoder_noise_counts": 0.0})
+    try:
+        ax.enc.zero_preset_bias_counts = -1.5
+        ax.zero_preset()
+        st = ax.wait_idle(10)
+        assert st.encoder_singleturn > 2**20 - 4  # encoder really reads just below its zero
+        assert -0.01 < st.dial < 0.0
+    finally:
+        ax.close()

@@ -320,6 +320,16 @@ class ClosedLoopRotaryAxis:
             self._seq += 1
             return self._enqueue("reset_multiturn", value=int(value))
 
+    def zero_preset(self) -> int:
+        """Store "here" as encoder zero (single-turn 0, multiturn 0) in the AksIM-2; dial becomes 0."""
+        with self._lock:
+            if self.enc is None or not hasattr(self.enc, "zero_preset"):
+                raise AxisError("encoder does not support a zero preset")
+            if self.status.busy:
+                raise AxisError("cannot zero preset while moving")
+            self._seq += 1
+            return self._enqueue("zero_preset")
+
     def read_detailed_status(self) -> Optional[int]:
         if self.enc is None or not hasattr(self.enc, "read_detailed_status"):
             return None
@@ -465,6 +475,8 @@ class ClosedLoopRotaryAxis:
             self._do_calibrate(cmd)
         elif cmd.kind == "reset_multiturn":
             self._do_reset_multiturn(cmd)
+        elif cmd.kind == "zero_preset":
+            self._do_zero_preset(cmd)
 
     def _stop_requested(self, cmd: _Cmd) -> bool:
         return self._stop_seq > cmd.seq or self._shutdown.is_set()
@@ -971,6 +983,31 @@ class ClosedLoopRotaryAxis:
             f"{result}; encoder OK"
             + (" (dial kept)" if keep else " (re-reference the position with SET if needed)")
         )
+
+    def _do_zero_preset(self, cmd: _Cmd) -> None:
+        self._set_message("zero preset: writing encoder offset (power-cycles the encoder)")
+        result = self.enc.zero_preset()
+        note = ""
+        with self._lock:
+            # The encoder's own zero and turn count changed on purpose: start afresh, at the
+            # turn nearest 0 (noise can make the first reading cpr-1 instead of 0).
+            self._total_counts = None
+            self._last_st = None
+            self._persisted_counts = 0
+            self._last_good_dial = None
+            self._blind = False
+            self._blind_exhausted = False
+            self.zero_offset_deg = 0.0
+            if self._has_multiturn and self.cfg.multiturn_reference != 0:
+                note = (f"; set axis.multiturn_reference: 0 in the config "
+                        f"(was {self.cfg.multiturn_reference})")
+                log.warning("zero preset reset the turn count to 0: set axis.multiturn_reference: 0")
+                self.cfg.multiturn_reference = 0
+            self.status.homed = False
+        self._poll_detailed_status_now()
+        self._poll_position()
+        self._save_state(force=True)
+        self._set_message(f"{result}; dial = 0{note}")
 
     def _poll_detailed_status_now(self) -> None:
         if self._detailed_status_ok:

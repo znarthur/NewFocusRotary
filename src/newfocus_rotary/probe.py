@@ -9,6 +9,7 @@
     newfocus-rotary-probe steps -c config.yaml -- -500             # raw picomotor steps, no encoder
     newfocus-rotary-probe -c config.yaml encoder-status              # AksIM-2 detailed status register
     newfocus-rotary-probe -c config.yaml reset-multiturn [--value 0] # clear a multiturn error
+    newfocus-rotary-probe -c config.yaml zero-preset --yes           # current position := encoder 0
     newfocus-rotary-probe -c config.yaml raw v 4 R04:020             # send raw E201 commands
     newfocus-rotary-probe -c config.yaml reg-read --bank 3 0x14 4    # read encoder registers
     newfocus-rotary-probe -c config.yaml reg-write [--bank 3] [--key] 0x14 0  # write one register
@@ -146,6 +147,37 @@ def cmd_reset_multiturn(args) -> int:
         print("encoder still reports an error; check 'encoder-status' and the mounting")
         return 1
     print("encoder OK. If the IOC uses a state file, re-reference with SET mode if the dial looks wrong.")
+    return 0
+
+
+def cmd_zero_preset(args) -> int:
+    from .e201 import EncoderError
+
+    if not args.yes:
+        print("Zero preset stores the current position as encoder zero in the AksIM-2's flash\n"
+              "(and sets the turn count to 0). Stop the motor and the IOC, then re-run with --yes.")
+        return 2
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    print("before:")
+    _print_reading(enc)
+    try:
+        print(enc.zero_preset())
+    except EncoderError as exc:
+        print(f"FAILED: {exc}")
+        return 1
+    finally:
+        print("after:")
+        try:
+            _print_reading(enc)
+        except Exception as exc:
+            print(f"  (read failed: {exc})")
+        enc.close()
+    if cfg.axis.multiturn_reference:
+        print(f"Note: set axis.multiturn_reference: 0 in the config (currently {cfg.axis.multiturn_reference}).")
+    print("If the IOC uses a state file, its dial offset is now stale: re-reference with SET, "
+          "or use the IOC's :ZeroPreset instead next time.")
     return 0
 
 
@@ -295,6 +327,9 @@ def main(argv=None) -> None:
     p = sub.add_parser("reset-multiturn", help="reset the AksIM-2 multiturn counter (clears multiturn error)")
     p.add_argument("--port")
     p.add_argument("--value", type=int, default=0, help="turn count to set (default 0)")
+    p = sub.add_parser("zero-preset", help="store the current position as encoder zero (AksIM-2 flash)")
+    p.add_argument("--port")
+    p.add_argument("--yes", action="store_true", help="confirm writing the encoder's non-volatile memory")
     p = sub.add_parser("raw", help="send raw E201 commands and print the replies")
     p.add_argument("--port")
     p.add_argument("commands", nargs="+")
@@ -316,7 +351,8 @@ def main(argv=None) -> None:
     fn = {"list": cmd_list, "encoder": cmd_encoder, "picomotor": cmd_picomotor,
           "calibrate": cmd_calibrate, "move": cmd_move, "steps": cmd_steps,
           "encoder-status": cmd_encoder_status, "reset-multiturn": cmd_reset_multiturn,
-          "raw": cmd_raw, "reg-read": cmd_reg_read, "reg-write": cmd_reg_write}[args.cmd]
+          "raw": cmd_raw, "reg-read": cmd_reg_read, "reg-write": cmd_reg_write,
+          "zero-preset": cmd_zero_preset}[args.cmd]
     sys.exit(fn(args))
 
 

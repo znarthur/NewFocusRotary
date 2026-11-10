@@ -120,6 +120,7 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 | `:EncDetailedStatus` | AksIM-2 detailed status register (bank 0, 0x4A), polled every 2 s when idle; -1 = not read |
 | `:EncBlips`, `:PosEstimated` | Encoder error blips ridden through; 1 while the readback is dead-reckoned |
 | `:ResetMultiturn` (+ `:MultiturnValue`) | Write 1 to reset the AksIM-2 multiturn counter (clears a multiturn error) |
+| `:ZeroPreset` | Write 1 to store the current position as the AksIM-2's zero (turn count 0); dial becomes 0. Writes encoder flash and power-cycles it (~3 s) |
 
 ## Moving without the encoder (open loop)
 
@@ -163,6 +164,27 @@ while the motor runs. Set `axis.encoder_error_tolerance_deg` to tolerate this:
 Pick the tolerance from how far the stage can drift unnoticed without harm.
 Without the encoder's turn count (`use_encoder_multiturn: false`) it must be
 below 180°.
+
+## Encoder zero preset
+
+`caput $(P)$(M):ZeroPreset 1`, or `newfocus-rotary-probe -c my.yaml zero-preset --yes`
+with the IOC stopped, makes the current position the encoder's own zero:
+single-turn 0, multiturn 0, stored in the AksIM-2. This replays RLS
+EncoSight's "Zero preset" exactly, as captured on real hardware:
+
+1. read bank 0 (bytes 0x00–0x03 = position offset; output = (raw − offset) mod 2^ST)
+2. multiturn ← 0
+3. write back 0x00–0x13 and 0x18 with only the offset changed
+4. key 0xCD → 0x48, command `'c'` (0x63, save to flash) → 0x49
+5. power-cycle the encoder (the new offset applies on restart; until then it reports nE)
+6. multiturn ← 0 again
+
+It refuses to start unless the encoder reads valid and steady (motor
+stopped). Afterwards the IOC sets its dial offset to 0, so the dial reads 0
+there. With `use_encoder_multiturn`, set `axis.multiturn_reference: 0` in the
+config, since the turn count is now 0; the status message reminds you. It
+writes non-volatile memory, so use it for commissioning, not routinely. For a
+plain software zero, use SET mode instead.
 
 ## Troubleshooting `AksIM-2 reports position error (nE bit)`
 

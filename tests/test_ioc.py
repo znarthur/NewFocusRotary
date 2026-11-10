@@ -268,3 +268,12 @@ def test_reset_multiturn_pv(ioc):
     assert get(ioc, M + ":ResetMultiturn") == 0
     assert "encoder OK" in get_str(ioc, M + ":Status")
     assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)
+
+
+def test_zero_preset_pv(ioc):
+    put(ioc, M + ":ZeroPreset", 1)
+    wait_dmov(ioc, 15)
+    assert get(ioc, M + ":ZeroPreset") == 0
+    assert "zero preset" in get_str(ioc, M + ":Status")
+    assert get(ioc, M + ".DRBV") == pytest.approx(0.0, abs=0.002)
+    assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)
