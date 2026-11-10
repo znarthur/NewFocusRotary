@@ -9,6 +9,9 @@
     newfocus-rotary-probe steps -c config.yaml -- -500             # raw picomotor steps, no encoder
     newfocus-rotary-probe -c config.yaml encoder-status              # AksIM-2 detailed status register
     newfocus-rotary-probe -c config.yaml reset-multiturn [--value 0] # clear a multiturn error
+    newfocus-rotary-probe -c config.yaml raw v 4 R04:020             # send raw E201 commands
+    newfocus-rotary-probe -c config.yaml reg-read --bank 3 0x14 4    # read encoder registers
+    newfocus-rotary-probe -c config.yaml reg-write [--bank 3] [--key] 0x14 0  # write one register
 """
 
 from __future__ import annotations
@@ -123,7 +126,8 @@ def cmd_reset_multiturn(args) -> int:
     print(f"{port}: {enc.version}")
     print("before:")
     _print_reading(enc)
-    enc.reset_multiturn(args.value)
+    variant = enc.reset_multiturn(args.value)
+    print(f"accepted write sequence: {variant}")
     time.sleep(0.2)
     print(f"after setting multiturn = {args.value}:")
     _print_reading(enc)
@@ -133,6 +137,44 @@ def cmd_reset_multiturn(args) -> int:
         print("encoder still reports an error; check 'encoder-status' and the mounting")
         return 1
     print("encoder OK. If the IOC uses a state file, re-reference with SET mode if the dial looks wrong.")
+    return 0
+
+
+def cmd_raw(args) -> int:
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    for c in args.commands:
+        print(f"  {c!r:>14} -> {enc.raw_query(c)!r}")
+    enc.close()
+    return 0
+
+
+def _int(x: str) -> int:
+    return int(x, 0)
+
+
+def cmd_reg_read(args) -> int:
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    if args.bank is not None:
+        print(f"  select bank {args.bank}: {enc.raw_query(f'Ws{args.bank:03d}:064')!r}")
+    print(f"  R{args.length:02d}:{args.address:03d} -> {enc.raw_query(f'R{args.length:02d}:{args.address:03d}')!r}")
+    enc.close()
+    return 0
+
+
+def cmd_reg_write(args) -> int:
+    cfg = load_config(args.config)
+    port, enc = _open_e201(cfg, args.port)
+    print(f"{port}: {enc.version}")
+    if args.key:
+        print(f"  key 0xCD -> 0x48: {enc.raw_query('Ws205:072')!r}")
+    if args.bank is not None:
+        print(f"  select bank {args.bank}: {enc.raw_query(f'Ws{args.bank:03d}:064')!r}")
+    print(f"  Ws{args.value:03d}:{args.address:03d} -> {enc.raw_query(f'Ws{args.value:03d}:{args.address:03d}')!r}")
+    enc.close()
     return 0
 
 
@@ -244,13 +286,28 @@ def main(argv=None) -> None:
     p = sub.add_parser("reset-multiturn", help="reset the AksIM-2 multiturn counter (clears multiturn error)")
     p.add_argument("--port")
     p.add_argument("--value", type=int, default=0, help="turn count to set (default 0)")
+    p = sub.add_parser("raw", help="send raw E201 commands and print the replies")
+    p.add_argument("--port")
+    p.add_argument("commands", nargs="+")
+    p = sub.add_parser("reg-read", help="read encoder registers through the E201")
+    p.add_argument("--port")
+    p.add_argument("--bank", type=_int)
+    p.add_argument("address", type=_int)
+    p.add_argument("length", type=_int, nargs="?", default=1)
+    p = sub.add_parser("reg-write", help="write one encoder register through the E201")
+    p.add_argument("--port")
+    p.add_argument("--bank", type=_int)
+    p.add_argument("--key", action="store_true", help="write unlock key 0xCD to 0x48 first")
+    p.add_argument("address", type=_int)
+    p.add_argument("value", type=_int)
     p = sub.add_parser("steps", help="move the picomotor a raw number of steps (no encoder)")
     p.add_argument("--velocity", type=int, help="steps/s (1-2000)")
     p.add_argument("steps", type=int)
     args = ap.parse_args(argv)
     fn = {"list": cmd_list, "encoder": cmd_encoder, "picomotor": cmd_picomotor,
           "calibrate": cmd_calibrate, "move": cmd_move, "steps": cmd_steps,
-          "encoder-status": cmd_encoder_status, "reset-multiturn": cmd_reset_multiturn}[args.cmd]
+          "encoder-status": cmd_encoder_status, "reset-multiturn": cmd_reset_multiturn,
+          "raw": cmd_raw, "reg-read": cmd_reg_read, "reg-write": cmd_reg_write}[args.cmd]
     sys.exit(fn(args))
 
 

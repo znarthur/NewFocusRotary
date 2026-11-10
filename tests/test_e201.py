@@ -166,3 +166,24 @@ def test_register_error_status():
     enc = E201_9B(t)
     with pytest.raises(EncoderError, match="Timeout"):
         enc.read_detailed_status()
+
+
+def test_multiturn_reset_falls_back_to_key_first():
+    unlocked = {"v": False}
+
+    class Locking(dict):
+        def __getitem__(self, k):
+            if k == "Ws205:072":
+                unlocked["v"] = True
+                return "0"
+            if k.endswith(":020") and not unlocked["v"]:
+                return "Error"
+            return "0"
+
+    t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
+    enc = E201_9B(t, BissFrameFormat(singleturn_bits=18, multiturn_bits=16))
+    t.replies = Locking()
+    assert enc.reset_multiturn(0) == "key, value, key, apply"
+    cmds = [w.decode() for w in t.written[2:]]
+    assert cmds[:3] == ["Ws003:064", "Ws000:020", "Ws205:072"]
+    assert cmds[-2:] == ["Ws205:072", "Ws109:073"]

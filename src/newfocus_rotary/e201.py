@@ -247,10 +247,14 @@ class E201_9B:
                 raise ValueError(f"Unsupported BiSS clock {clock_khz} kHz; choose from {sorted(E201_9B_CLOCK_KHZ)}")
             self.query(f"M{E201_9B_CLOCK_KHZ[clock_khz]:02d}")
 
-    def query(self, cmd: str) -> str:
+    def raw_query(self, cmd: str) -> str:
+        """Send any command and return the reply unchecked (diagnostics)."""
         with self.lock:
             self._t.write(cmd.encode("ascii"))
-            reply = self._t.readline().decode("ascii", errors="replace").strip()
+            return self._t.readline().decode("ascii", errors="replace").strip()
+
+    def query(self, cmd: str) -> str:
+        reply = self.raw_query(cmd)
         if "error" in reply.lower():
             raise EncoderError(f"E201 command {cmd!r} failed: {reply!r}")
         return reply
@@ -318,15 +322,32 @@ class E201_9B:
         raw = self.read_registers(AKSIM2_DETAILED_STATUS_BANK, AKSIM2_DETAILED_STATUS_ADDR, AKSIM2_DETAILED_STATUS_LEN)
         return int.from_bytes(raw, "big")
 
-    def reset_multiturn(self, value: int = 0) -> None:
-        """Set the AksIM-2 multiturn counter (RLS sequence: value, key, apply command)."""
+    def reset_multiturn(self, value: int = 0) -> str:
+        """Set the AksIM-2 multiturn counter.  Returns which write sequence was accepted.
+
+        First tries RLS's sequence (value, key, apply).  If the encoder rejects the
+        value write (as seen on some units: the registers are locked), retries
+        with the unlock key written first.
+        """
+        data = int(value).to_bytes(4, "big", signed=value < 0)
         with self.lock:
-            self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR,
-                                 int(value).to_bytes(4, "big", signed=value < 0))
+            try:
+                self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR, data)
+                variant = "value, key, apply"
+            except EncoderError as first:
+                try:
+                    self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
+                    self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR, data)
+                except EncoderError as second:
+                    raise EncoderError(
+                        f"multiturn value write rejected: {first}; with unlock key first: {second}"
+                    ) from None
+                variant = "key, value, key, apply"
             time.sleep(0.1)
             self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
             self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_SET_MULTITURN)
             time.sleep(0.1)
+        return variant
 
     def power_off(self) -> None:
         self.query("F")
