@@ -293,3 +293,28 @@ def test_reset_multiturn_keeps_dial_when_valid():
         assert st.encoder_counts < 1 << 18
     finally:
         ax.close()
+
+
+def _garbage_multiturn_axis(tmp_path, use_mt):
+    # Reproduces the real unit: 18+16 bit AksIM-2 whose turn count reads 0xFF61 (-159 turns).
+    stage_kw = {"encoder_offset_deg": -159 * 360 + 342.07, "initial_angle_deg": 0.0}
+    return make_axis(tmp_path, fmt=BissFrameFormat(singleturn_bits=18, multiturn_bits=16),
+                     stage_kw=stage_kw, cfg_kw={"use_encoder_multiturn": use_mt})
+
+
+def test_ignore_unreliable_multiturn_count(tmp_path):
+    ax, stage = _garbage_multiturn_axis(tmp_path, use_mt=True)
+    try:
+        assert ax.get_status().dial == pytest.approx(-159 * 360 + 342.07, abs=0.01)  # "wildly off"
+    finally:
+        ax.close()
+    # Switch to software turn counting: the stale turn count in the state file must be ignored.
+    ax, stage = _garbage_multiturn_axis(tmp_path, use_mt=False)
+    try:
+        assert ax.get_status().dial == pytest.approx(342.07, abs=0.01)
+        ax.set_dial_position(90.0)
+        ax.move_to(100.0)  # crosses the encoder's 360 -> 0 wrap
+        st = ax.wait_idle(60)
+        assert st.dial == pytest.approx(100.0, abs=ax.params.deadband_deg)
+    finally:
+        ax.close()

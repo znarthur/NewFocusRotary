@@ -165,6 +165,14 @@ write the value to bank 3, 0x14..0x17, write unlock key 0xCD to 0x48, then
 send command 0x6D to 0x49. On at least one unit that write is rejected,
 hence the fallbacks.
 
+**Dial wildly off after a multiturn error?** The `'b'` command and power cycle
+clear the error but keep the turn count. A count like `mt=65377` (−159 turns,
+signed) puts the dial near −56,900°. If the counter can't be trusted, set
+`axis.use_encoder_multiturn: false`: the IOC then ignores the encoder's turn
+count, counts turns itself from the single-turn angle, and discards turn
+counts saved under the old setting. Then re-reference once with SET mode
+(`caput $(P)$(M).SET 1; caput $(P)$(M) <true angle>; caput $(P)$(M).SET 0`).
+
 If the error persists:
 
 Each BiSS frame from the AksIM-2 carries two status bits after the position:

@@ -50,6 +50,8 @@ axis:
   stall_chunks: 5         # consecutive no-motion moves before declaring a stall
   limit_margin_deg: 0.5   # abort a move that overshoots a soft limit by this much
   state_file: /var/lib/newfocus-rotary/m1.state.json   # example; persists SET offset, turns, learning
+  use_encoder_multiturn: true   # false: ignore the AksIM-2 turn count and count turns in software
+                                # (use when the multiturn counter is unreliable, e.g. mismatch errors)
 
 motor:                    # initial motor-record field values
   velocity: 1.0           # VELO  deg/s (converted to 8742 steps/s, max 2000)

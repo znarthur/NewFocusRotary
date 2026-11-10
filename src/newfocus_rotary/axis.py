@@ -73,6 +73,9 @@ class AxisConfig:
     stall_chunks: int = 5
     limit_margin_deg: float = 0.5  # stop a move that runs this far past a soft limit
     state_file: Optional[str] = None  # persists zero offset, turn count and learned steps/degree
+    # Use the encoder's own multiturn count.  False: ignore it and count turns in
+    # software from the single-turn angle (use when the multiturn counter is unreliable).
+    use_encoder_multiturn: bool = True
     detailed_status_period_s: float = 2.0  # poll the AksIM-2 detailed status register when idle (0 = off)
 
 
@@ -156,7 +159,8 @@ class ClosedLoopRotaryAxis:
         fmt = self.enc.fmt if self.enc is not None else BissFrameFormat()
         self.cpr = fmt.counts_per_rev
         self.eres_deg = 360.0 / self.cpr
-        self._has_multiturn = fmt.multiturn_bits > 0
+        self._has_multiturn = fmt.multiturn_bits > 0 and config.use_encoder_multiturn
+        self._count_source = "encoder-multiturn" if self._has_multiturn else "software-unwrap"
         if self.enc is None:
             self.params.closed_loop = False
         # Open-loop position, integrated from the 8742 step counter.
@@ -903,8 +907,12 @@ class ClosedLoopRotaryAxis:
             with open(path) as f:
                 st = json.load(f)
             self.zero_offset_deg = float(st.get("zero_offset_deg", 0.0))
-            if "last_counts" in st and st.get("counts_per_rev") == self.cpr:
+            same_source = st.get("count_source", "encoder-multiturn" if self._has_multiturn else "software-unwrap")
+            if "last_counts" in st and st.get("counts_per_rev") == self.cpr and same_source == self._count_source:
                 self._persisted_counts = int(st["last_counts"])
+            elif "last_counts" in st:
+                log.warning("state file turn count ignored (encoder resolution or multiturn setting changed); "
+                            "re-reference the position with SET")
             if "steps_per_deg_fwd" in st and "steps_per_deg_rev" in st:
                 self.spd = {1: float(st["steps_per_deg_fwd"]), -1: float(st["steps_per_deg_rev"])}
             if "open_loop_dial" in st:
@@ -928,6 +936,7 @@ class ClosedLoopRotaryAxis:
             st = {
                 "zero_offset_deg": self.zero_offset_deg,
                 "counts_per_rev": self.cpr,
+                "count_source": self._count_source,
                 "steps_per_deg_fwd": self.spd[1],
                 "steps_per_deg_rev": self.spd[-1],
                 "calibrated_fwd": self._spd0[1],
