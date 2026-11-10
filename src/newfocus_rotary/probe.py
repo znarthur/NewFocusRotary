@@ -5,6 +5,8 @@
     newfocus-rotary-probe picomotor
     newfocus-rotary-probe calibrate -c config.yaml [--steps 2000]
     newfocus-rotary-probe move -c config.yaml 45.0
+    newfocus-rotary-probe move -c config.yaml --open-loop 45.0   # ignore the encoder
+    newfocus-rotary-probe steps -c config.yaml -- -500             # raw picomotor steps, no encoder
 """
 
 from __future__ import annotations
@@ -81,7 +83,7 @@ def cmd_picomotor(args) -> int:
     cfg = load_config(args.config)
     from .config import build_hardware
 
-    cfg.encoder.transport = "sim"  # only the picomotor is needed here
+    cfg.encoder.transport = "none"  # only the picomotor is needed here
     pm, _ = build_hardware(cfg)
     print(f"*IDN?: {pm.identity}")
     for ax in range(1, 5):
@@ -115,8 +117,36 @@ def cmd_calibrate(args) -> int:
         axis.close()
 
 
+def cmd_steps(args) -> int:
+    """Move the picomotor a raw number of steps; the encoder is not touched."""
+    from .config import build_hardware
+
+    cfg = load_config(args.config)
+    cfg.encoder.transport = "none"
+    pm, _ = build_hardware(cfg)
+    ax = cfg.axis.picomotor_axis
+    if args.velocity:
+        pm.set_velocity(ax, args.velocity)
+    before = pm.position(ax)
+    pm.move_relative(ax, args.steps)
+    try:
+        while not pm.motion_done(ax):
+            print(f"\r  axis {ax} step counter {pm.position(ax):>10d}", end="", flush=True)
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pm.stop(ax)
+        print("\nstopped")
+        return 130
+    after = pm.position(ax)
+    print(f"\r  axis {ax}: {before} -> {after} ({after - before:+d} steps)")
+    return 0
+
+
 def cmd_move(args) -> int:
     cfg = load_config(args.config)
+    if args.open_loop:
+        cfg.motor.use_encoder = False
+        cfg.encoder.transport = "none"  # don't even open the E201
     axis = _axis(cfg)
     try:
         t0 = time.monotonic()
@@ -150,10 +180,14 @@ def main(argv=None) -> None:
     p = sub.add_parser("calibrate", help="measure steps/degree in both directions")
     p.add_argument("--steps", type=int, default=2000)
     p = sub.add_parser("move", help="closed-loop move to a dial position (no IOC)")
+    p.add_argument("--open-loop", action="store_true", help="move by step count, ignore the encoder")
     p.add_argument("target", type=float)
+    p = sub.add_parser("steps", help="move the picomotor a raw number of steps (no encoder)")
+    p.add_argument("--velocity", type=int, help="steps/s (1-2000)")
+    p.add_argument("steps", type=int)
     args = ap.parse_args(argv)
     fn = {"list": cmd_list, "encoder": cmd_encoder, "picomotor": cmd_picomotor,
-          "calibrate": cmd_calibrate, "move": cmd_move}[args.cmd]
+          "calibrate": cmd_calibrate, "move": cmd_move, "steps": cmd_steps}[args.cmd]
     sys.exit(fn(args))
 
 

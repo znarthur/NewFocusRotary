@@ -100,7 +100,7 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 | RDBD, RTRY, RCNT, MISS | In-position tolerance, maximum corrective moves, retries used, ran-out-of-retries flag. |
 | BDST | Final approach always from the BDST side (closed loop). |
 | VELO, ACCL, VMAX, S | Converted to 8742 steps/s using the learned steps/degree (8742 maximum is 2000 steps/s). |
-| UEIP | Yes = closed loop (default). No = one open-loop move using the learned steps/degree. |
+| UEIP | Yes = closed loop (default). No = open loop: moves and readback by step count, encoder faults ignored (see below). |
 | CNEN | Disable stops the motor and refuses moves. |
 | MRES, ERES, SREV, UREV | MRES = learned deg/step (writing it sets steps/degree). ERES = 360/2^singleturn_bits. |
 | MSTA | DIRECTION, DONE, POSITION, SLIP_STALL, PRESENT, PROBLEM, MOVING, GAIN_SUPPORT, COMM_ERR, HOMED. |
@@ -117,6 +117,61 @@ rot.set_current_position(0.0)   # SET mode; redefines the user position
 | `:ResetLearning` | Write 1 to go back to the last calibration |
 | `:EncCounts`, `:EncSingleTurn`, `:StepCount` | Raw encoder and picomotor counters |
 | `:EncError`, `:EncWarning`, `:CommError`, `:CRCErrors` | Diagnostics |
+
+## Moving without the encoder (open loop)
+
+If the encoder is faulty or missing, you can still drive the picomotor:
+
+* **At runtime:** `caput $(P)$(M).UEIP 0` (No). Moves then go by step count:
+  the readback is integrated from the 8742 step counter using the learned
+  steps/degree for each direction. It continues from the last encoder
+  position, so it doesn't jump. Encoder faults are still shown in
+  `:EncError`/`:EncWarning` but never block motion. While open loop, MSTA
+  POSITION is clear and the record carries a MINOR alarm, because the
+  readback is an estimate, not a measurement. `caput $(P)$(M).UEIP 1` returns
+  to closed loop; RBV then shows the real encoder position and VAL is set to it.
+* **From startup:** set `motor.use_encoder: false`. To skip the E201 entirely
+  (e.g. it is unplugged), set `encoder.transport: none`.
+* **From the command line:** `newfocus-rotary-probe -c my.yaml move --open-loop 10.0`,
+  or raw steps with `newfocus-rotary-probe -c my.yaml steps -- -500`.
+
+Open-loop accuracy is only as good as the steps/degree estimate, which is
+typically a few percent off for a picomotor.
+
+## Troubleshooting `AksIM-2 reports position error (nE bit)`
+
+Each BiSS frame from the AksIM-2 carries two status bits after the position:
+**nE** (error) and **nW** (warning), both active low. When nE is 0, the
+encoder is saying *its own position value is not valid*. The IOC therefore
+refuses closed-loop moves rather than servo on a bad number. This is the
+encoder's own report, not a USB or E201 communication problem: those show
+up as CRC or timeout errors.
+
+1. **Confirm the frame decode.** Run `newfocus-rotary-probe -c my.yaml encoder -n 50`.
+   If every line says `crc=ok` and the configured length appears in the
+   "lengths consistent with CRC" list, the bit layout is right and the error
+   bit really is the encoder's. If CRC fails, fix `singleturn_bits`/`multiturn_bits` first.
+2. **Does it depend on angle?** Move open loop (above) through a full turn
+   while watching `:EncError` or the probe output.
+   * Error at **all** angles usually means a gross mounting problem: ring
+     missing or too far from the readhead (ride height), large radial or axial
+     offset, wrong ring for the readhead, or supply problem.
+   * Error only over **part** of the turn points to eccentricity or tilt of
+     the magnetic ring, local damage or contamination (magnetic particles) on
+     the ring, or a ride height at the edge of tolerance.
+   * Warning (nW) without error means marginal signal. It still works but is
+     close to the limit.
+3. **Check the installation** against the AksIM-2 data sheet tolerances
+   (ride height, radial/axial offset, and ring-to-shaft runout). On a
+   picomotor rotary mount, the ring centring on the shaft is the usual culprit.
+4. **Self-calibration.** AksIM-2 encoders support an on-board
+   self-calibration after mounting that compensates eccentricity. RLS's
+   software for the E201 can run it and read the encoder's detailed status
+   register, which says *why* nE is set. This IOC does not implement that
+   register access yet.
+5. **Supply/cabling.** The E201 powers the encoder (5 V). A long or damaged
+   cable, or a loose connector, can cause intermittent errors; those usually
+   come with CRC failures (`:CRCErrors` counting up).
 
 ## How the closed loop works
 

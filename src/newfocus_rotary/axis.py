@@ -18,6 +18,12 @@ repeatable:
 
 After every chunk the observed steps/degree updates the estimate (EWMA), so
 the controller adapts to load and direction asymmetry.
+
+Open-loop mode (``closed_loop=False``, motor-record UEIP=No) drives the
+picomotor by step count only: the dial position is integrated from the 8742
+step counter with the per-direction steps/degree, and encoder faults are
+reported but never block motion.  Use it when the encoder is unavailable or
+faulty; the encoder (if present) is still read for diagnostics.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .e201 import EncoderError, EncoderReading
+from .e201 import BissFrameFormat, EncoderError, EncoderReading
 from .picomotor import MAX_VELOCITY, PicomotorError
 from .transports import TransportError
 
@@ -145,9 +151,15 @@ class ClosedLoopRotaryAxis:
         self._thread: Optional[threading.Thread] = None
         self._listeners: list[Callable[[AxisStatus], None]] = []
 
-        self.cpr = self.enc.fmt.counts_per_rev
+        fmt = self.enc.fmt if self.enc is not None else BissFrameFormat()
+        self.cpr = fmt.counts_per_rev
         self.eres_deg = 360.0 / self.cpr
-        self._has_multiturn = self.enc.fmt.multiturn_bits > 0
+        self._has_multiturn = fmt.multiturn_bits > 0
+        if self.enc is None:
+            self.params.closed_loop = False
+        # Open-loop position, integrated from the 8742 step counter.
+        self._ol_dial = 0.0
+        self._ol_last_steps: Optional[int] = None
         self.zero_offset_deg = 0.0
         self._total_counts: Optional[int] = None
         self._last_st: Optional[int] = None
@@ -158,6 +170,7 @@ class ClosedLoopRotaryAxis:
         self._last_velocity_steps: Optional[int] = None
         self._last_accel_steps: Optional[int] = None
         self._last_tp_read = 0.0
+        self._last_fault: Optional[str] = None
 
         self.status = AxisStatus(counts_per_rev=self.cpr)
         self._load_state()
@@ -166,9 +179,9 @@ class ClosedLoopRotaryAxis:
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
         try:
-            self._poll_position()
             self._read_steps()
-            self._set_message("idle")
+            self._poll_position()
+            self._set_message("idle" if self.params.closed_loop else "idle (open loop: encoder not used)")
         except HW_ERRORS as exc:
             self._comm_fault(exc)
         self._thread = threading.Thread(target=self._run, name="rotary-axis", daemon=True)
@@ -192,12 +205,31 @@ class ClosedLoopRotaryAxis:
         with self._lock:
             return dataclasses.replace(self.status)
 
+    @property
+    def has_encoder(self) -> bool:
+        return self.enc is not None
+
     def set_params(self, **kwargs) -> None:
         with self._lock:
+            was_closed = self.params.closed_loop
             for k, v in kwargs.items():
                 if not hasattr(self.params, k):
                     raise AttributeError(k)
                 setattr(self.params, k, v)
+            if self.enc is None:
+                self.params.closed_loop = False
+            if was_closed and not self.params.closed_loop:
+                # Continue from the last known position so the readback does not jump.
+                if math.isfinite(self.status.dial):
+                    self._ol_dial = self.status.dial
+                self.status.dial = self._ol_dial
+                self.status.problem = False
+                self.status.message = "open loop: moving by step count, encoder ignored"
+            elif not was_closed and self.params.closed_loop:
+                self.status.valid = False
+                if self._total_counts is not None:
+                    self.status.dial = self._counts_to_dial(self._total_counts)
+                self.status.message = "closed loop: position from encoder"
             self._update_limit_flags()
 
     def move_to(self, dial_deg: float) -> int:
@@ -242,6 +274,8 @@ class ClosedLoopRotaryAxis:
         """Measure steps/degree in both directions with a +steps / -steps move pair."""
         with self._lock:
             self._check_can_move()
+            if not self.params.closed_loop:
+                raise AxisError("calibration needs the encoder (UEIP=Yes)")
             self._seq += 1
             return self._enqueue("calibrate", steps=int(abs(steps)))
 
@@ -266,6 +300,13 @@ class ClosedLoopRotaryAxis:
         with self._lock:
             if self.status.busy:
                 raise AxisError("cannot redefine position while moving")
+            if not self.params.closed_loop:
+                self._ol_dial = float(dial_deg)
+                self.status.dial = self._ol_dial
+                self.status.homed = False
+                self._update_limit_flags()
+                self._save_state(force=True)
+                return
             if self._total_counts is None:
                 raise AxisError("no valid encoder reading yet")
             enc_deg = self.cfg.encoder_sign * self._total_counts * self.eres_deg
@@ -396,14 +437,42 @@ class ClosedLoopRotaryAxis:
         return reading
 
     def _poll_position(self) -> float:
+        if not self.params.closed_loop:
+            return self._poll_open_loop()
+        return self._poll_encoder(strict=True)
+
+    def _poll_open_loop(self) -> float:
+        """Open loop: position from the step counter; encoder read for diagnostics only."""
+        self._read_steps()
+        if self.enc is not None:
+            try:
+                self._poll_encoder(strict=False)
+            except HW_ERRORS as exc:
+                with self._lock:
+                    if isinstance(exc, EncoderError) and "CRC" not in str(exc):
+                        self.status.encoder_error = True
+                log.debug("encoder unavailable in open loop: %s", exc)
+        with self._lock:
+            self.status.dial = self._ol_dial
+            self.status.valid = True
+            self._update_limit_flags()
+            dial = self.status.dial
+        self._notify()
+        return dial
+
+    def _poll_encoder(self, strict: bool) -> float:
         reading = self._read_encoder()
         with self._lock:
             self.status.encoder_warning = reading.warning
             self.status.encoder_error = reading.error
             if reading.error:
+                if not strict:
+                    return self.status.dial
                 self.status.problem = True
                 self.status.valid = False
-                raise EncoderError("AksIM-2 reports position error (nE bit)")
+                raise EncoderError(
+                    "AksIM-2 reports position error (nE bit); set UEIP=No to move open loop"
+                )
             st = reading.singleturn
             if self._has_multiturn:
                 mt_bits = self.enc.fmt.multiturn_bits
@@ -425,10 +494,12 @@ class ClosedLoopRotaryAxis:
             self.status.encoder_counts = total
             self.status.encoder_singleturn = st
             self.status.encoder_multiturn = reading.multiturn
-            self.status.dial = self._counts_to_dial(total)
-            self.status.valid = True
             if self.status.comm_error:
                 self.status.comm_error = False
+            if not strict:
+                return self.status.dial
+            self.status.dial = self._counts_to_dial(total)
+            self.status.valid = True
             self._update_limit_flags()
             dial = self.status.dial
         self._notify()
@@ -438,6 +509,11 @@ class ClosedLoopRotaryAxis:
         steps = self.pm.position(self.cfg.picomotor_axis)
         with self._lock:
             self.status.steps = steps
+            if self._ol_last_steps is not None:
+                delta = steps - self._ol_last_steps
+                if delta:
+                    self._ol_dial += delta / self.spd[1 if delta > 0 else -1]
+            self._ol_last_steps = steps
         self._last_tp_read = time.monotonic()
         return steps
 
@@ -447,8 +523,11 @@ class ClosedLoopRotaryAxis:
             if time.monotonic() - self._last_tp_read > 1.0:
                 self._read_steps()
             with self._lock:
-                if self.status.message.startswith("comm error") and not self.status.comm_error:
-                    self.status.message = "idle (communication restored)"
+                if self._last_fault is not None and not (self.status.comm_error or self.status.encoder_error):
+                    log.warning("recovered from: %s", self._last_fault)
+                    self._last_fault = None
+                    if self.status.message.startswith("comm error") or "nE bit" in self.status.message:
+                        self.status.message = "idle (fault cleared)"
         except HW_ERRORS as exc:
             self._comm_fault(exc)
 
@@ -459,7 +538,11 @@ class ClosedLoopRotaryAxis:
         self.status.at_low_limit = p.low_limit_deg is not None and math.isfinite(d) and d <= p.low_limit_deg
 
     def _comm_fault(self, exc: Exception) -> None:
-        log.warning("hardware error: %s", exc)
+        text = str(exc)
+        if text != self._last_fault:  # log once per distinct fault, not on every poll
+            self._last_fault = text
+            kind = "encoder fault" if isinstance(exc, EncoderError) and "CRC" not in text else "hardware error"
+            log.warning("%s: %s", kind, text)
         with self._lock:
             if not isinstance(exc, EncoderError) or "CRC" in str(exc):
                 self.status.comm_error = True
@@ -563,7 +646,7 @@ class ClosedLoopRotaryAxis:
         return outcome, tp1 - tp0, dial1 - dial0
 
     def _learn(self, direction: int, steps_done: int, moved: float) -> None:
-        if not self.cfg.adapt:
+        if not self.cfg.adapt or not self.params.closed_loop:
             return
         if abs(steps_done) < self.cfg.min_learn_steps or moved * direction <= 0:
             return
@@ -626,7 +709,7 @@ class ClosedLoopRotaryAxis:
             self._learn(direction, steps_done, moved)
 
             expected = abs(steps_done) / spd if spd else 0.0
-            if expected > 10 * self.eres_deg and outcome == "done":
+            if p.closed_loop and expected > 10 * self.eres_deg and outcome == "done":
                 if moved * direction < -max(5 * self.eres_deg, 0.3 * expected):
                     wrong_way += 1
                     if wrong_way >= 2:
@@ -748,6 +831,8 @@ class ClosedLoopRotaryAxis:
                 self._persisted_counts = int(st["last_counts"])
             if "steps_per_deg_fwd" in st and "steps_per_deg_rev" in st:
                 self.spd = {1: float(st["steps_per_deg_fwd"]), -1: float(st["steps_per_deg_rev"])}
+            if "open_loop_dial" in st:
+                self._ol_dial = float(st["open_loop_dial"])
             if "calibrated_fwd" in st and "calibrated_rev" in st:
                 self._spd0 = {1: float(st["calibrated_fwd"]), -1: float(st["calibrated_rev"])}
             log.info("loaded axis state from %s", path)
@@ -762,7 +847,7 @@ class ClosedLoopRotaryAxis:
         if not force and now - self._last_state_save < 5.0:
             return
         with self._lock:
-            if self._total_counts is None and not force:
+            if self._total_counts is None and self.params.closed_loop and not force:
                 return
             st = {
                 "zero_offset_deg": self.zero_offset_deg,
@@ -771,6 +856,7 @@ class ClosedLoopRotaryAxis:
                 "steps_per_deg_rev": self.spd[-1],
                 "calibrated_fwd": self._spd0[1],
                 "calibrated_rev": self._spd0[-1],
+                "open_loop_dial": self._ol_dial,
             }
             if self._total_counts is not None:
                 st["last_counts"] = self._total_counts

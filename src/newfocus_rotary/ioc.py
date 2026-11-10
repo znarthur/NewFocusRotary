@@ -421,6 +421,13 @@ class RotaryMotorIOC(PVGroup):
         if key == "UEIP":
             await instance.write(value, verify_value=False)
             await self._sync_params()
+            actual = "Yes" if self.axis.params.closed_loop else "No"
+            if actual != value:
+                await self._w(self.status_msg, "no encoder configured: open loop only")
+            await instance.write(actual, verify_value=False)
+            st = await self._call(self.axis.get_status)
+            await self._publish_status(st)
+            await self._sync_val_to_rbv()  # readback source changed; avoid an unintended move
             raise SkipWrite()
         if key == "SYNC":
             if value:
@@ -580,16 +587,19 @@ class RotaryMotorIOC(PVGroup):
             await self._w(F.steps_per_revolution, int(round(360.0 * spd_avg)))
             await self._w(F.max_velocity, 2000.0 / max(st.steps_per_deg_fwd, st.steps_per_deg_rev))
 
-        msta = MSTA_PRESENT | MSTA_GAIN_SUPPORT
+        closed = self.axis.params.closed_loop
+        msta = MSTA_GAIN_SUPPORT
+        if self.axis.has_encoder:
+            msta |= MSTA_PRESENT
         if st.direction > 0:
             msta |= MSTA_DIRECTION
         if not st.busy:
             msta |= MSTA_DONE
-        if self.axis.params.closed_loop:
+        if closed:
             msta |= MSTA_POSITION
         if st.stalled:
             msta |= MSTA_SLIP_STALL
-        if st.problem or st.encoder_error:
+        if st.problem or (st.encoder_error and closed):
             msta |= MSTA_PROBLEM
         if st.moving:
             msta |= MSTA_MOVING
@@ -612,9 +622,9 @@ class RotaryMotorIOC(PVGroup):
 
         if st.comm_error:
             alarm = (AlarmStatus.COMM, AlarmSeverity.INVALID_ALARM)
-        elif st.encoder_error or st.stalled or st.problem:
+        elif (st.encoder_error and closed) or st.stalled or st.problem:
             alarm = (AlarmStatus.STATE, AlarmSeverity.MAJOR_ALARM)
-        elif st.missed or st.encoder_warning:
+        elif st.missed or st.encoder_warning or st.encoder_error or not closed:
             alarm = (AlarmStatus.STATE, AlarmSeverity.MINOR_ALARM)
         else:
             alarm = (AlarmStatus.NO_ALARM, AlarmSeverity.NO_ALARM)

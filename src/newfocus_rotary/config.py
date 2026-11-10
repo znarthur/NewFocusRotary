@@ -37,7 +37,7 @@ class PicomotorConfig:
 
 @dataclass
 class EncoderConfig:
-    transport: str = "serial"  # serial | sim
+    transport: str = "serial"  # serial | sim | none (no encoder: open loop only)
     port: str = "auto"  # e.g. /dev/ttyACM0, /dev/serial/by-id/..., or auto (first VID 0x0483)
     usb_serial: Optional[str] = None  # used with port: auto
     singleturn_bits: int = 20
@@ -73,6 +73,7 @@ class MotorDefaults:
     dial_low_limit: float = 0.0  # DLLM
     user_offset: float = 0.0  # OFF
     user_direction: str = "Pos"  # DIR
+    use_encoder: bool = True  # UEIP: False starts in open loop (encoder ignored)
 
 
 @dataclass
@@ -95,6 +96,7 @@ class Config:
             backlash_deg=m.backlash,
             jog_velocity_deg_s=m.jog_velocity,
             home_position_deg=m.home_position,
+            closed_loop=m.use_encoder and self.encoder.transport != "none",
             low_limit_deg=m.dial_low_limit if limits else None,
             high_limit_deg=m.dial_high_limit if limits else None,
         )
@@ -164,7 +166,9 @@ def build_hardware(cfg: Config):
         log.info("8742: %s via %s", pm.identity, t.description)
 
     fmt = ec.frame_format()
-    if ec.transport == "sim":
+    if ec.transport == "none":
+        enc = None
+    elif ec.transport == "sim":
         from .sim import SimE201
 
         enc = SimE201(stage, fmt)

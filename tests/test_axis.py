@@ -43,9 +43,11 @@ def test_open_loop_is_worse_than_closed_loop():
     ax, stage = make_axis(params_kw={"closed_loop": False})
     try:
         start = ax.get_status().dial
+        angle0 = stage.angle
         ax.move_to(start + 10)
         st = ax.wait_idle(60)
-        assert abs(st.dial - (start + 10)) > 0.05  # 1000 steps/deg estimate is wrong
+        assert st.dial == pytest.approx(start + 10, abs=0.002)  # reported: integrated steps
+        assert abs((stage.angle - angle0) - 10) > 0.05  # real motion: 1000 steps/deg estimate is wrong
     finally:
         ax.close()
 
@@ -191,3 +193,71 @@ def test_disabled_axis_refuses_motion(axis):
     axis.set_params(enabled=False)
     with pytest.raises(AxisError):
         axis.move_to(0.0)
+
+
+def test_open_loop_moves_despite_encoder_error():
+    ax, stage = make_axis()
+    try:
+        stage.fail_encoder = True
+        time.sleep(0.2)
+        start_angle = stage.angle
+        dial = ax.get_status().dial
+        ax.move_to(dial + 5)
+        st = ax.wait_idle(10)
+        assert st.problem  # closed loop refuses to move on a faulty encoder
+        assert "UEIP=No" in st.message
+        assert stage.angle == pytest.approx(start_angle, abs=1e-6)
+
+        ax.set_params(closed_loop=False)
+        st = ax.get_status()
+        assert not st.problem and st.dial == pytest.approx(dial, abs=1e-3)  # no readback jump
+        ax.move_to(dial + 5)
+        st = ax.wait_idle(30)
+        assert not st.problem and not st.missed
+        assert st.dial == pytest.approx(dial + 5, abs=0.002)  # integrated from steps
+        assert st.encoder_error  # still reported
+        moved = stage.angle - start_angle
+        assert 3.5 < moved < 6.5  # really moved; open-loop accuracy only
+        ax.move_to(dial + 2)  # reverse direction uses the reverse steps/degree
+        st = ax.wait_idle(30)
+        assert st.dial == pytest.approx(dial + 2, abs=0.002)
+    finally:
+        ax.close()
+
+
+def test_no_encoder_at_all():
+    stage = SimRotaryStage(SimStageParams(speedup=20))
+    cfg = AxisConfig(steps_per_degree=1000, poll_period_s=0.01, settle_time_s=0.0)
+    ax = ClosedLoopRotaryAxis(SimPicomotor8742(stage), None, cfg)
+    ax.start()
+    try:
+        assert not ax.params.closed_loop and not ax.has_encoder
+        ax.set_params(closed_loop=True)  # cannot be enabled without an encoder
+        assert not ax.params.closed_loop
+        ax.set_dial_position(10.0)
+        ax.move_to(12.0)
+        st = ax.wait_idle(30)
+        assert st.dial == pytest.approx(12.0, abs=0.002)
+        assert stage.steps == 2000
+        ax.jog(-1)
+        time.sleep(0.2)
+        ax.stop()
+        st = ax.wait_idle(5)
+        assert st.dial < 12.0
+    finally:
+        ax.close()
+
+
+def test_open_loop_position_persists(tmp_path):
+    ax, stage = make_axis(tmp_path, params_kw={"closed_loop": False})
+    try:
+        ax.set_dial_position(30.0)
+        ax.move_to(31.5)
+        ax.wait_idle(30)
+    finally:
+        ax.close()
+    ax2, _ = make_axis(tmp_path, params_kw={"closed_loop": False})
+    try:
+        assert ax2.get_status().dial == pytest.approx(31.5, abs=0.002)
+    finally:
+        ax2.close()

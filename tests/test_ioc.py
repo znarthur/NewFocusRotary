@@ -241,3 +241,21 @@ def test_extra_pvs(ioc):
     wait_dmov(ioc, 60)
     assert "calibrated" in get_str(ioc, M + ":Status")
     assert get(ioc, M + ":Calibrate") == 0
+
+
+def test_open_loop_via_ueip(ioc):
+    rbv = get(ioc, M + ".RBV")
+    put(ioc, M + ".UEIP", 0)  # No: move by step count
+    time.sleep(0.2)
+    assert get(ioc, M + ".UEIP") in (0, "No")
+    assert not get(ioc, M + ".MSTA") & (1 << 5)  # POSITION (closed loop) bit cleared
+    assert get(ioc, M + ".RBV") == pytest.approx(rbv, abs=0.002)  # no jump on switching
+    put(ioc, M, rbv + 2.0, wait=True)
+    assert get(ioc, M + ".DMOV") == 1
+    assert get(ioc, M + ".RBV") == pytest.approx(rbv + 2.0, abs=0.002)
+    put(ioc, M + ".UEIP", 1)
+    time.sleep(0.3)
+    assert get(ioc, M + ".MSTA") & (1 << 5)
+    # back on the encoder: the open-loop move was only approximately 2 deg
+    assert abs(get(ioc, M + ".RBV") - (rbv + 2.0)) < 0.5
+    assert get(ioc, M) == pytest.approx(get(ioc, M + ".RBV"), abs=0.002)
