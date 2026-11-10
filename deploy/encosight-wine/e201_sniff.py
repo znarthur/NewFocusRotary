@@ -79,7 +79,8 @@ def main() -> int:
             # E201 replies end in \r: log one line per reply.
             *lines, rest = (pending + data).split(b"\r")
             for line in lines:
-                log.write(f"{now:10.4f} <DEV {(line + b'\r')!r}\n")
+                reply = line + b"\r"
+                log.write(f"{now:10.4f} <DEV {reply!r}\n")
             pending = rest
 
 if __name__ == "__main__":
