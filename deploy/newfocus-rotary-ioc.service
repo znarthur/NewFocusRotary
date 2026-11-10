@@ -1,0 +1,20 @@
+# systemd unit for the rotary picomotor IOC.
+# Install: sudo cp newfocus-rotary-ioc.service /etc/systemd/system/ && sudo systemctl enable --now newfocus-rotary-ioc
+[Unit]
+Description=EPICS motor IOC: New Focus 8742 rotary picomotor, closed loop on AksIM-2 (E201-9B)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=epics
+Group=epics
+SupplementaryGroups=plugdev dialout
+Environment=EPICS_CAS_INTF_ADDR_LIST=
+ExecStart=/opt/newfocus-rotary/venv/bin/newfocus-rotary-ioc -c /etc/newfocus-rotary/config.yaml -v
+Restart=on-failure
+RestartSec=5
+StateDirectory=newfocus-rotary
+
+[Install]
+WantedBy=multi-user.target

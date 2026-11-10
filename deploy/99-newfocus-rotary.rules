@@ -1,0 +1,10 @@
+# udev rules for the closed-loop rotary picomotor IOC.
+# Install:  sudo cp 99-newfocus-rotary.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+# Add the IOC user to the "plugdev" and "dialout" groups (or adjust GROUP below).
+
+# New Focus / Newport 8742 Picomotor controller (vendor-specific USB, accessed with pyusb)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="104d", ATTRS{idProduct}=="4000", MODE="0660", GROUP="plugdev"
+
+# RLS / Renishaw E201 encoder interface (USB CDC virtual COM port, STMicro VID)
+# Gives a stable name /dev/e201-<serial>; ModemManager must not probe it.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{product}=="*E201*", SYMLINK+="e201-%s{serial}", MODE="0660", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
