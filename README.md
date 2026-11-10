@@ -184,10 +184,11 @@ E201 (`F`/`N`). It reports which one worked.
 * `newfocus-rotary-probe -c my.yaml encoder-status` prints the detailed status
   register, which says which condition is set (bit meanings in the AksIM-2 data sheet).
 
-The value write uses the register sequence from RLS's own E201 software:
-write the value to bank 3, 0x14..0x17, write unlock key 0xCD to 0x48, then
-send command 0x6D to 0x49. On at least one unit that write is rejected,
-hence the fallbacks.
+The value write uses the exact sequence captured from RLS EncoSight
+(`deploy/encosight-wine`, `encosight --sniff`) resetting a real AksIM-2:
+select bank 0, write the value to 0x14..0x17, write unlock key 0xCD to 0x48,
+then send command 0x6D to 0x49. RLS's open-source preset says bank 3; the
+tested encoder rejects that, so bank 3 is only a fallback.
 
 **Dial wildly off after a multiturn error?** The `'b'` command and power cycle
 clear the error but keep the turn count. A count like `mt=65377` (−159 turns,

@@ -135,24 +135,27 @@ def test_e201_crc_retry():
     assert r.crc_ok and r.singleturn == 777
 
 
-def test_aksim2_multiturn_reset_sequence():
+# Captured from RLS EncoSight 5.0.0.17 (under Wine, via e201_sniff.py) setting the multiturn
+# value of a real AksIM-2 on an E201-9B; the turn count went from 65528 to 0.
+ENCOSIGHT_SET_MULTITURN_0 = [
+    "Ws000:064",  # select bank 0
+    "Ws000:020", "Ws000:021", "Ws000:022", "Ws000:023",  # multiturn = 0 at 0x14..0x17
+    "Ws205:072",  # key 0xCD -> 0x48
+    "Ws109:073",  # 0x6D ('m', apply multiturn) -> 0x49
+]
+
+
+class AnyOK(dict):
+    def __getitem__(self, k):
+        return "0"
+
+
+def test_set_multiturn_matches_encosight():
     t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
     enc = E201_9B(t, BissFrameFormat(singleturn_bits=18, multiturn_bits=16))
-    t.replies = {}
-
-    class AnyOK(dict):
-        def __getitem__(self, k):
-            return "0"
-
     t.replies = AnyOK()
-    enc.set_multiturn(0)
-    cmds = [w.decode() for w in t.written[2:]]
-    assert cmds == [
-        "Ws003:064",  # select bank 3
-        "Ws000:020", "Ws000:021", "Ws000:022", "Ws000:023",  # multiturn = 0 at 0x14..0x17
-        "Ws205:072",  # key 0xCD -> 0x48
-        "Ws109:073",  # 0x6D ('m', apply multiturn) -> 0x49
-    ]
+    assert enc.set_multiturn(0) == "multiturn set to 0 (bank 0)"
+    assert [w.decode() for w in t.written[2:]] == ENCOSIGHT_SET_MULTITURN_0
 
 
 def test_aksim2_detailed_status_read():
@@ -168,24 +171,23 @@ def test_register_error_status():
         enc.read_detailed_status()
 
 
-def test_multiturn_reset_falls_back_to_key_first():
-    unlocked = {"v": False}
+def test_set_multiturn_falls_back_to_bank_3():
+    class Bank0Locked(dict):
+        bank = 0
 
-    class Locking(dict):
         def __getitem__(self, k):
-            if k == "Ws205:072":
-                unlocked["v"] = True
-                return "0"
-            if k.endswith(":020") and not unlocked["v"]:
+            if k.endswith(":064"):
+                self.bank = int(k[2:5])
+            if k.endswith(":020") and self.bank == 0:
                 return "Error"
             return "0"
 
     t = ScriptedSerial({"v": "E201-9B", "N": "ON"})
     enc = E201_9B(t, BissFrameFormat(singleturn_bits=18, multiturn_bits=16))
-    t.replies = Locking()
-    assert enc.set_multiturn(0) == "multiturn set to 0 (key, value, key, apply)"
+    t.replies = Bank0Locked()
+    assert enc.set_multiturn(0) == "multiturn set to 0 (bank 3)"
     cmds = [w.decode() for w in t.written[2:]]
-    assert cmds[:3] == ["Ws003:064", "Ws000:020", "Ws205:072"]
+    assert cmds[:3] == ["Ws000:064", "Ws000:020", "Ws003:064"]
     assert cmds[-2:] == ["Ws205:072", "Ws109:073"]
 
 

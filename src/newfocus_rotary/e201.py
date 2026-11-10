@@ -26,7 +26,10 @@ Register access (BiSS-C bidirectional, E201-9B only), as used by RLS's tool:
 
 AksIM-2 registers (RLS ``registers_preset.py``, ``aksim2_preset``):
 
-* multiturn value: bank 3, 0x14..0x17 (32 bit, big endian)
+* multiturn value: bank 0, 0x14..0x17 (32 bit, big endian).  Captured from RLS
+  EncoSight 5.0.0.17 talking to a real AksIM-2: ``Ws000:064``, ``Ws000:020`` ..
+  ``Ws000:023``, ``Ws205:072``, ``Ws109:073``.  (RLS's open-source preset says
+  bank 3; that write is rejected by this encoder, so bank 3 is only a fallback.)
 * unlock key: write 0xCD to 0x48 before a command
 * command register 0x49: 0x6D (``m``) = apply multiturn value,
   0x62 (``b``) = clear the multiturn error (RLS application note MBD02)
@@ -86,7 +89,8 @@ def describe_detailed_status(value: int) -> list[str]:
         if value >> bit & 1:
             out.append(f"bit {bit}: " + AKSIM2_DETAILED_STATUS_BITS.get(bit, "see AksIM-2 BiSS app note MBD02"))
     return out
-AKSIM2_MULTITURN_BANK = 3
+AKSIM2_MULTITURN_BANK = 0  # as EncoSight does it
+AKSIM2_MULTITURN_BANK_FALLBACK = 3  # RLS open-source preset; rejected by the tested unit
 AKSIM2_MULTITURN_ADDR = 0x14
 AKSIM2_DETAILED_STATUS_BANK = 0
 AKSIM2_DETAILED_STATUS_ADDR = 0x4A
@@ -340,29 +344,26 @@ class E201_9B:
         return int.from_bytes(raw, "big")
 
     def set_multiturn(self, value: int = 0) -> str:
-        """Write a new multiturn value.  Returns which write sequence was accepted.
+        """Write a new multiturn value (EncoSight's sequence).  Returns what was accepted.
 
-        Tries RLS's sequence (value, key, apply), then with the unlock key first.
+        Bank 0, value to 0x14..0x17, key 0xCD to 0x48, command 0x6D to 0x49.
+        Falls back to bank 3 if bank 0 is rejected.
         """
         data = int(value).to_bytes(4, "big", signed=value < 0)
+        errors = []
         with self.lock:
-            try:
-                self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR, data)
-                variant = "value, key, apply"
-            except EncoderError as first:
+            for bank in (AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_BANK_FALLBACK):
                 try:
-                    self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
-                    self.write_registers(AKSIM2_MULTITURN_BANK, AKSIM2_MULTITURN_ADDR, data)
-                except EncoderError as second:
-                    raise EncoderError(
-                        f"multiturn value write rejected: {first}; with unlock key first: {second}"
-                    ) from None
-                variant = "key, value, key, apply"
-            time.sleep(0.1)
+                    self.write_registers(bank, AKSIM2_MULTITURN_ADDR, data)
+                    break
+                except EncoderError as exc:
+                    errors.append(f"bank {bank}: {exc}")
+            else:
+                raise EncoderError("multiturn value write rejected: " + "; ".join(errors))
             self.write_register(AKSIM2_KEY_ADDR, AKSIM2_KEY)
             self.write_register(AKSIM2_COMMAND_ADDR, AKSIM2_CMD_SET_MULTITURN)
             time.sleep(0.1)
-        return f"multiturn set to {value} ({variant})"
+        return f"multiturn set to {value} (bank {bank})"
 
     def clear_multiturn_error_command(self) -> None:
         """Command 'b' to the command register (clears the multiturn mismatch error)."""
